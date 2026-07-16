@@ -30,13 +30,15 @@ Record schema (all string fields are plain text; they are HTML-escaped here):
   "agents_note": "footnote under the agents table (optional)",
   "gate_note":   "footnote under the phases block (optional)",
   "environment": [["Repo", "/path @ sha"], ["Spec", "docs/..."]],
-  "token_summary": [   # optional; written by summarize_tokens.py
+  "token_summary": [   # optional; written by summarize_tokens.py.
+                       # Renders the "by role" donut + breakdown table.
     {"group": "investigation", "models": "Sonnet", "agents": 2,
      "tokens_in": 1000, "tokens_out": 100, "tokens": 1100, "pct": 40.0},
     {"group": "total (tracked)", "models": "", "agents": 5,
      "tokens_in": 2500, "tokens_out": 250, "tokens": 2750, "pct": 100.0}
   ],
-  "model_summary": [   # optional; written by summarize_tokens.py
+  "model_summary": [   # optional; written by summarize_tokens.py.
+                       # Renders the "by model" donut + breakdown table.
     {"model": "Sonnet", "agents": 3,
      "tokens_in": 2000, "tokens_out": 200, "tokens": 2200, "pct": 80.0},
     {"model": "total (tracked)", "agents": 5,
@@ -50,6 +52,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 from pathlib import Path
 
 CSS = """\
@@ -57,22 +60,26 @@ CSS = """\
     --bg:#f7f8f6; --panel:#ffffff; --ink:#1d2321; --muted:#5d6a64; --line:#dde3df;
     --accent:#0e6f5c; --run:#b7791f; --done:#0e6f5c; --wait:#5d6a64; --fail:#b3362c;
     --chip-run:#fdf3e0; --chip-done:#e3f1ec; --chip-wait:#eceeed; --chip-fail:#fbe7e4;
+    --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --s4:#008300; --s5:#4a3aa7; --s6:#e34948; --s7:#e87ba4; --s8:#eb6834;
     font-size:16px;
   }
   @media (prefers-color-scheme: dark){:root{
     --bg:#151a18; --panel:#1d2421; --ink:#e8ece9; --muted:#94a29b; --line:#2c3531;
     --accent:#4cc2a7; --run:#e0a94e; --done:#4cc2a7; --wait:#94a29b; --fail:#e07a6e;
     --chip-run:#33290f; --chip-done:#12332b; --chip-wait:#252b28; --chip-fail:#3a1d19;
+    --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#008300; --s5:#9085e9; --s6:#e66767; --s7:#d55181; --s8:#d95926;
   }}
   :root[data-theme="light"]{
     --bg:#f7f8f6; --panel:#ffffff; --ink:#1d2321; --muted:#5d6a64; --line:#dde3df;
     --accent:#0e6f5c; --run:#b7791f; --done:#0e6f5c; --wait:#5d6a64; --fail:#b3362c;
     --chip-run:#fdf3e0; --chip-done:#e3f1ec; --chip-wait:#eceeed; --chip-fail:#fbe7e4;
+    --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --s4:#008300; --s5:#4a3aa7; --s6:#e34948; --s7:#e87ba4; --s8:#eb6834;
   }
   :root[data-theme="dark"]{
     --bg:#151a18; --panel:#1d2421; --ink:#e8ece9; --muted:#94a29b; --line:#2c3531;
     --accent:#4cc2a7; --run:#e0a94e; --done:#4cc2a7; --wait:#94a29b; --fail:#e07a6e;
     --chip-run:#33290f; --chip-done:#12332b; --chip-wait:#252b28; --chip-fail:#3a1d19;
+    --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#008300; --s5:#9085e9; --s6:#e66767; --s7:#d55181; --s8:#d95926;
   }
   body{background:var(--bg);color:var(--ink);font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;padding:2rem 1.25rem 4rem}
   main{max-width:60rem;margin:0 auto;display:flex;flex-direction:column;gap:1.25rem}
@@ -98,6 +105,16 @@ CSS = """\
   .phase span{font-size:.75rem;color:var(--muted)}
   .note{color:var(--muted);font-size:.82rem;margin:.6rem 0 0}
   code{font:.85em ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--chip-wait);padding:.05rem .3rem;border-radius:4px}
+  .pies{display:flex;flex-wrap:wrap;gap:1.5rem 2rem}
+  .pie{flex:1 1 20rem;min-width:15rem;margin:0}
+  .pie figcaption{font-size:.8rem;font-weight:600;color:var(--ink);margin:0 0 .7rem}
+  .pie-body{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+  .donut{flex:0 0 auto}
+  .legend{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.35rem;font-size:.82rem;flex:1 1 9rem;min-width:0}
+  .legend li{display:flex;align-items:center;gap:.5rem}
+  .legend .sw{width:.72rem;height:.72rem;border-radius:3px;flex:0 0 auto}
+  .legend .lab{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .legend .val{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 """
 
 VALID_STATUSES = {"run", "done", "wait", "fail"}
@@ -117,6 +134,104 @@ def fmt_tokens(value: object) -> str:
     if isinstance(value, int):
         return f"{value:,}"
     return esc(value if value is not None else "—")
+
+
+def fmt_compact(n: int) -> str:
+    """Short token count for the small donut center/legend (1_234 -> '1.2k')."""
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k".replace(".0k", "k")
+    return f"{n / 1_000_000:.2f}M".replace(".00M", "M")
+
+
+def pie_slices(rows: list[dict], label_key: str) -> list[dict]:
+    """Extract drawable slices from a token_summary/model_summary list.
+
+    Skips the appended "total (tracked)" row and any zero/non-numeric total.
+    Keeps record order (stable colour<->entity mapping); if there are more
+    than 8 groups, the smallest fold into a single grey "other" slot so a
+    9th hue is never invented (a data-viz non-negotiable).
+    """
+    items = [
+        {"label": str(r.get(label_key, "?")), "tokens": r["tokens"]}
+        for r in rows
+        if isinstance(r.get("tokens"), int) and r["tokens"] > 0
+        and not str(r.get(label_key, "")).strip().lower().startswith("total")
+    ]
+    if len(items) > 8:
+        keep = set(sorted(range(len(items)), key=lambda i: items[i]["tokens"],
+                          reverse=True)[:7])
+        folded = sum(it["tokens"] for i, it in enumerate(items) if i not in keep)
+        items = [it for i, it in enumerate(items) if i in keep]
+        items.append({"label": "other", "tokens": folded, "other": True})
+    total = sum(it["tokens"] for it in items) or 1
+    for i, it in enumerate(items):
+        it["slot"] = "muted" if it.get("other") else str((i % 8) + 1)
+        it["pct"] = 100.0 * it["tokens"] / total
+    return items
+
+
+def donut(items: list[dict], caption: str, size: int = 168, thick: int = 26) -> str:
+    """Inline-SVG donut: one dash-arc <circle> per slice, transparent 2px
+    gaps that reveal the panel surface, total in the hole. Colours are CSS
+    vars (--s1..--s8 / --muted) so they swap with the light/dark theme."""
+    total = sum(it["tokens"] for it in items) or 1
+    r = (size - thick) / 2
+    center = size / 2
+    circ = 2 * math.pi * r
+    gap = 200.0 / circ if len(items) > 1 else 0.0  # ~2px expressed on pathLength=100
+    arcs, cum = [], 0.0
+    for it in items:
+        seg = 100.0 * it["tokens"] / total
+        dash = max(seg - gap, 0.5)
+        var = "--muted" if it["slot"] == "muted" else f"--s{it['slot']}"
+        arcs.append(
+            f'<circle cx="{center}" cy="{center}" r="{r:.2f}" fill="none" '
+            f'pathLength="100" stroke-width="{thick}" style="stroke:var({var})" '
+            f'stroke-dasharray="{dash:.3f} {100 - dash:.3f}" '
+            f'stroke-dashoffset="{-cum:.3f}">'
+            f'<title>{esc(it["label"])} — {it["tokens"]:,} tokens '
+            f'({it["pct"]:.1f}%)</title></circle>'
+        )
+        cum += seg
+    return (
+        f'<svg class="donut" width="{size}" height="{size}" '
+        f'viewBox="0 0 {size} {size}" role="img" '
+        f'aria-label="Donut chart of {esc(caption)}">'
+        f'<g transform="rotate(-90 {center} {center})">{"".join(arcs)}</g>'
+        f'<text x="{center}" y="{center}" text-anchor="middle" '
+        f'dominant-baseline="central" '
+        f'style="fill:var(--ink);font:600 1.15rem system-ui,sans-serif">'
+        f'{esc(fmt_compact(total))}</text>'
+        f'<text x="{center}" y="{center + 18}" text-anchor="middle" '
+        f'style="fill:var(--muted);font:.66rem system-ui,sans-serif;'
+        f'letter-spacing:.04em">total tokens</text></svg>'
+    )
+
+
+def legend(items: list[dict]) -> str:
+    lis = "\n".join(
+        f'      <li><span class="sw" style="background:var('
+        f'{"--muted" if it["slot"] == "muted" else f"--s{it['slot']}"})"></span>'
+        f'<span class="lab">{esc(it["label"])}</span>'
+        f'<span class="val">{esc(fmt_compact(it["tokens"]))} · '
+        f'{it["pct"]:.0f}%</span></li>'
+        for it in items
+    )
+    return f'    <ul class="legend">\n{lis}\n    </ul>'
+
+
+def pie_figure(items: list[dict], caption: str) -> str:
+    return (
+        f'    <figure class="pie">\n'
+        f'      <figcaption>{esc(caption)}</figcaption>\n'
+        f'      <div class="pie-body">\n'
+        f'      {donut(items, caption)}\n'
+        f'{legend(items)}\n'
+        f'      </div>\n'
+        f'    </figure>'
+    )
 
 
 def render(record: dict) -> str:
@@ -197,6 +312,29 @@ def render(record: dict) -> str:
   </section>
 """
 
+    # Donut charts visualising token distribution by role and by model,
+    # from the same summaries that back the breakdown tables below.
+    pie_figs = []
+    if record.get("token_summary"):
+        role_items = pie_slices(record["token_summary"], "group")
+        if role_items:
+            pie_figs.append(pie_figure(role_items, "By role"))
+    if record.get("model_summary"):
+        model_items = pie_slices(record["model_summary"], "model")
+        if model_items:
+            pie_figs.append(pie_figure(model_items, "By model"))
+    pie_section = ""
+    if pie_figs:
+        figs = "\n".join(pie_figs)
+        pie_section = f"""
+  <section>
+    <h2>Token distribution</h2>
+    <div class="pies">
+{figs}
+    </div>
+  </section>
+"""
+
     total = sum(a["tokens"] for a in record.get("agents", []) if isinstance(a.get("tokens"), int))
     total_in = sum(a["tokens_in"] for a in record.get("agents", []) if isinstance(a.get("tokens_in"), int))
     total_out = sum(a["tokens_out"] for a in record.get("agents", []) if isinstance(a.get("tokens_out"), int))
@@ -239,7 +377,7 @@ def render(record: dict) -> str:
     </div>
     <p class="note">Known token totals so far: in <b>{total_in:,}</b> · out <b>{total_out:,}</b> · total <b>{total:,}</b> (agents with numeric counts only; grok in/out splits are estimated).</p>
 {agents_note_html}  </section>
-{summary_section}{model_summary_section}
+{pie_section}{summary_section}{model_summary_section}
   <section>
     <h2>Environment</h2>
     <table>
