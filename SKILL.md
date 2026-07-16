@@ -49,10 +49,9 @@ You are the advisor. Your job is to orchestrate and verify.
     - Rule of thumb: The advisor shouldn't need to write code. Implementers should write code. Investigators read. 
     - Subagents should never use the same model as the advisor. As a corollary, subagents should always write code or read. They should always be implementers or investigators. 
 * Pass the following message to every subagent
-    """
-    -------------------------------------------------
-    -----   SHARED MESSAGE FOR ALL SUBAGENTS   ------
-    -------------------------------------------------
+
+```text
+=== SHARED MESSAGE FOR ALL SUBAGENTS ===
     Read [(optional) instructions]
     Scope your tasks. Protect your context window. Subagents are a good tool to protect your context window, among other uses. 
     You can launch subagents of your own. So can their subagents. Each subagent can launch its subagents.
@@ -66,8 +65,8 @@ You are the advisor. Your job is to orchestrate and verify.
     -------------------------------------------------
     -----         END OF SHARED MESSAGE        ------
     -------------------------------------------------
-    """
-    Fill in the model names and (optional) instructions.
+=== END SHARED MESSAGE ===
+```
 
 
 ## Monitoring
