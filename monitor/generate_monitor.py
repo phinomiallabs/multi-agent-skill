@@ -119,6 +119,17 @@ CSS = """\
   .legend .sw{width:.72rem;height:.72rem;border-radius:3px;flex:0 0 auto}
   .legend .lab{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .legend .val{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .comp{display:flex;flex-direction:column;gap:.5rem}
+  .comp-row{display:flex;align-items:center;gap:.7rem;font-size:.82rem}
+  .comp-lab{flex:0 0 8rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .comp-track{flex:1 1 auto;min-width:0}
+  .comp-bar{display:flex;height:.9rem;border-radius:3px;overflow:hidden;min-width:3px}
+  .comp-seg{height:100%}
+  .comp-val{flex:0 0 auto;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;font-size:.78rem}
+  .comp-legend{display:flex;flex-wrap:wrap;gap:1rem;font-size:.76rem;color:var(--muted);margin:.75rem 0 .1rem}
+  .comp-legend span{display:inline-flex;align-items:center;gap:.35rem}
+  .comp-legend i{width:.72rem;height:.72rem;border-radius:2px;display:inline-block}
+  .seg-cache{background:repeating-linear-gradient(45deg,var(--muted) 0 2px,transparent 2px 5px),var(--chip-wait)}
 """
 
 VALID_STATUSES = {"run", "done", "wait", "fail"}
@@ -242,6 +253,50 @@ def pie_figure(items: list[dict], caption: str,
     )
 
 
+def comp_bars(rows: list[dict], label_key: str) -> str:
+    """Stacked composition bars: each summary row's total broken into input
+    (processed once) + output + cache-read (re-reads, hatched). Bar length is
+    total, on one shared scale, so the cache-read chunk is visible against the
+    solid 'unique' part. Rows without cache data (grok) render all-solid."""
+    data = [r for r in rows
+            if isinstance(r.get("tokens"), int) and r["tokens"] > 0
+            and not str(r.get(label_key, "")).strip().lower().startswith("total")]
+    if not data:
+        return ""
+    maxtot = max(r["tokens"] for r in data) or 1
+    rows_html = []
+    for r in data:
+        tot = r["tokens"]
+        cr = int(r.get("cache_read") or 0)
+        out = int(r.get("tokens_out") or 0)
+        new_in = max(tot - cr - out, 0)
+
+        def seg(width: int, style: str, cls: str, label: str) -> str:
+            if width <= 0:
+                return ""
+            return (f'<span class="comp-seg {cls}" style="width:{100.0 * width / tot:.3f}%;'
+                    f'{style}" title="{esc(label)}: {width:,}"></span>')
+
+        segs = (seg(new_in, "background:var(--s1)", "", "input (processed once)")
+                + seg(out, "background:var(--s2)", "", "output")
+                + seg(cr, "", "seg-cache", "cache-read (re-reads)"))
+        rows_html.append(
+            f'      <div class="comp-row"><span class="comp-lab">{esc(r[label_key])}</span>'
+            f'<span class="comp-track"><span class="comp-bar" style="width:{100.0 * tot / maxtot:.2f}%">'
+            f'{segs}</span></span>'
+            f'<span class="comp-val">{esc(fmt_compact(tot))} · unique '
+            f'{esc(fmt_compact(tot - cr))}</span></div>'
+        )
+    legend_html = (
+        '      <div class="comp-legend">'
+        '<span><i style="background:var(--s1)"></i>input (once)</span>'
+        '<span><i style="background:var(--s2)"></i>output</span>'
+        '<span><i class="seg-cache"></i>cache-read (re-reads)</span>'
+        '<span>solid = unique (total &minus; cache-read)</span></div>'
+    )
+    return "\n".join(rows_html) + "\n" + legend_html
+
+
 def render(record: dict) -> str:
     phases = "\n".join(
         f'      <div class="phase"><b>{esc(p["name"])}</b><span>{esc(p["detail"])}</span>'
@@ -274,9 +329,11 @@ def render(record: dict) -> str:
 
     # Cache-neutral note shared by the two breakdown tables.
     share_note = ('<p class="note">Share = % of all tracked tokens. '
-                  'Gen.&nbsp;share = % of output (generated) tokens — cache-neutral: '
-                  "Claude totals include cache-read tokens (context re-read every "
-                  "call) that inflate them; grok's do not.</p>")
+                  'Gen.&nbsp;share = % of output (generated) tokens. '
+                  'Unique = total &minus; cache-read tokens (context re-read every '
+                  "call), i.e. tokens processed once. Claude's totals are dominated "
+                  "by cache-reads; grok exposes none on disk, so grok's unique = its "
+                  'total.</p>')
 
     # Optional by-role breakdown written by summarize_tokens.py.
     summary_section = ""
@@ -288,7 +345,8 @@ def render(record: dict) -> str:
             f'<td class="num">{_opt(s, "tokens_out")}</td>'
             f'<td class="num">{int(s["tokens"]):,}</td>'
             f'<td class="num">{esc(s["pct"])}%</td>'
-            f'<td class="num">{_share(s, "out_pct")}</td></tr>'
+            f'<td class="num">{_share(s, "out_pct")}</td>'
+            f'<td class="num">{_opt(s, "unique")}</td></tr>'
             for s in record["token_summary"]
         )
         summary_section = f"""
@@ -296,7 +354,7 @@ def render(record: dict) -> str:
     <h2>Token breakdown by role</h2>
     <div class="wrap">
     <table>
-      <thead><tr><th>Role</th><th>Model(s)</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th></tr></thead>
+      <thead><tr><th>Role</th><th>Model(s)</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th><th class="num">Unique&nbsp;(&minus;cache)</th></tr></thead>
       <tbody>
 {srows}
       </tbody>
@@ -316,7 +374,8 @@ def render(record: dict) -> str:
             f'<td class="num">{_opt(s, "tokens_out")}</td>'
             f'<td class="num">{int(s["tokens"]):,}</td>'
             f'<td class="num">{esc(s["pct"])}%</td>'
-            f'<td class="num">{_share(s, "out_pct")}</td></tr>'
+            f'<td class="num">{_share(s, "out_pct")}</td>'
+            f'<td class="num">{_opt(s, "unique")}</td></tr>'
             for s in record["model_summary"]
         )
         model_summary_section = f"""
@@ -324,7 +383,7 @@ def render(record: dict) -> str:
     <h2>Token breakdown by model</h2>
     <div class="wrap">
     <table>
-      <thead><tr><th>Model</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th></tr></thead>
+      <thead><tr><th>Model</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th><th class="num">Unique&nbsp;(&minus;cache)</th></tr></thead>
       <tbody>
 {mrows}
       </tbody>
@@ -352,8 +411,9 @@ def render(record: dict) -> str:
 
     total_figs = _pies("tokens", "total tokens")
     gen_figs = _pies("tokens_out", "output tokens")
+    unique_figs = _pies("unique", "unique tokens")
     pie_section = ""
-    if total_figs or gen_figs:
+    if total_figs or gen_figs or unique_figs:
         blocks = ""
         if total_figs:
             blocks += f"""    <h3 class="pie-group">Total tokens</h3>
@@ -369,10 +429,37 @@ def render(record: dict) -> str:
     </div>
     <p class="note">Slices are <b>output (generated) tokens</b> — neither provider inflates output, so this is the fair share of work. Matches the <b>Gen.&nbsp;share</b> column below.</p>
 """
+        if unique_figs:
+            blocks += f"""    <h3 class="pie-group">Unique tokens · total &minus; cache-reads</h3>
+    <div class="pies">
+{chr(10).join(unique_figs)}
+    </div>
+    <p class="note">Slices are <b>unique tokens</b> (total &minus; cache-reads) — tokens processed once, crediting real input work that output-only drops. Matches the <b>Unique</b> column below.</p>
+"""
         pie_section = f"""
   <section>
     <h2>Token distribution</h2>
 {blocks}  </section>
+"""
+
+    # Composition bars decompose each total into input/output/cache-read, so
+    # the cache-read chunk that "unique" removes is visible against the solid bar.
+    cblocks = ""
+    if record.get("model_summary"):
+        bars = comp_bars(record["model_summary"], "model")
+        if bars:
+            cblocks += f'    <h3 class="pie-group">By model</h3>\n    <div class="comp">\n{bars}\n    </div>\n'
+    if record.get("token_summary"):
+        bars = comp_bars(record["token_summary"], "group")
+        if bars:
+            cblocks += f'    <h3 class="pie-group">By role</h3>\n    <div class="comp">\n{bars}\n    </div>\n'
+    comp_section = ""
+    if cblocks:
+        comp_section = f"""
+  <section>
+    <h2>Token composition · unique vs cache-reads</h2>
+    <p class="note">Bar length = total tokens (all bars share one scale). The hatched part is cache-read re-reads; the solid part is <b>unique</b> (total &minus; cache-read). Grok exposes no cache-read on disk, so its bar is all solid.</p>
+{cblocks}  </section>
 """
 
     total = sum(a["tokens"] for a in record.get("agents", []) if isinstance(a.get("tokens"), int))
@@ -417,7 +504,7 @@ def render(record: dict) -> str:
     </div>
     <p class="note">Known token totals so far: in <b>{total_in:,}</b> · out <b>{total_out:,}</b> · total <b>{total:,}</b> (agents with numeric counts only; grok in/out splits are estimated).</p>
 {agents_note_html}  </section>
-{pie_section}{summary_section}{model_summary_section}
+{pie_section}{comp_section}{summary_section}{model_summary_section}
   <section>
     <h2>Environment</h2>
     <table>

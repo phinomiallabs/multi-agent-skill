@@ -37,20 +37,25 @@ def summarize(record: dict) -> list[dict]:
     for entry in record.get("token_log", []):
         key = entry.get("group") or entry.get("model", "unknown")
         g = groups.setdefault(key, {"group": key, "models": set(), "agents": 0,
-                                    "tokens": 0, "tokens_in": 0, "tokens_out": 0})
+                                    "tokens": 0, "tokens_in": 0, "tokens_out": 0,
+                                    "cache_read": 0})
         g["models"].add(entry.get("model", "?"))
         g["agents"] += 1
         g["tokens"] += int(entry.get("tokens", 0))
         g["tokens_in"] += int(entry.get("tokens_in") or 0)
         g["tokens_out"] += int(entry.get("tokens_out") or 0)
+        g["cache_read"] += int(entry.get("cache_read") or 0)
 
     total = sum(g["tokens"] for g in groups.values()) or 1
     # out_pct is the cache-neutral view: share of OUTPUT (generated) tokens,
     # which neither provider inflates — unlike `pct` (share of total tokens),
-    # where Claude's cache-read tokens dominate the denominator.
+    # where Claude's cache-read tokens dominate the denominator. `unique` =
+    # tokens - cache_read ("unique tokens processed"); unique_pct is its share.
     total_out = sum(g["tokens_out"] for g in groups.values()) or 1
+    total_unique = sum(g["tokens"] - g["cache_read"] for g in groups.values()) or 1
     rows = []
     for g in groups.values():
+        unique = g["tokens"] - g["cache_read"]
         rows.append({
             "group": g["group"],
             "models": ", ".join(sorted(g["models"])),
@@ -58,9 +63,13 @@ def summarize(record: dict) -> list[dict]:
             "tokens_in": g["tokens_in"],
             "tokens_out": g["tokens_out"],
             "tokens": g["tokens"],
+            "cache_read": g["cache_read"],
+            "unique": unique,
             "pct": round(100.0 * g["tokens"] / total, 1),
             "out_pct": round(100.0 * g["tokens_out"] / total_out, 1),
+            "unique_pct": round(100.0 * unique / total_unique, 1),
         })
+    tot_cache = sum(g["cache_read"] for g in groups.values())
     rows.append({
         "group": "total (tracked)",
         "models": "",
@@ -68,8 +77,11 @@ def summarize(record: dict) -> list[dict]:
         "tokens_in": sum(g["tokens_in"] for g in groups.values()),
         "tokens_out": sum(g["tokens_out"] for g in groups.values()),
         "tokens": total,
+        "cache_read": tot_cache,
+        "unique": total - tot_cache,
         "pct": 100.0,
         "out_pct": 100.0,
+        "unique_pct": 100.0,
     })
     return rows
 
@@ -80,38 +92,49 @@ def summarize_by_model(record: dict) -> list[dict]:
     for entry in record.get("token_log", []):
         key = entry.get("model") or "unknown"
         m = models.setdefault(key, {"model": key, "agents": set(),
-                                    "tokens": 0, "tokens_in": 0, "tokens_out": 0})
+                                    "tokens": 0, "tokens_in": 0, "tokens_out": 0,
+                                    "cache_read": 0})
         m["agents"].add(entry.get("agent", "?"))
         m["tokens"] += int(entry.get("tokens", 0))
         m["tokens_in"] += int(entry.get("tokens_in") or 0)
         m["tokens_out"] += int(entry.get("tokens_out") or 0)
+        m["cache_read"] += int(entry.get("cache_read") or 0)
 
     total = sum(m["tokens"] for m in models.values()) or 1
     total_out = sum(m["tokens_out"] for m in models.values()) or 1  # cache-neutral base
+    total_unique = sum(m["tokens"] - m["cache_read"] for m in models.values()) or 1
     rows = []
     for m in models.values():
+        unique = m["tokens"] - m["cache_read"]
         rows.append({
             "model": m["model"],
             "agents": len(m["agents"]),
             "tokens_in": m["tokens_in"],
             "tokens_out": m["tokens_out"],
             "tokens": m["tokens"],
+            "cache_read": m["cache_read"],
+            "unique": unique,
             "pct": round(100.0 * m["tokens"] / total, 1),
             "out_pct": round(100.0 * m["tokens_out"] / total_out, 1),
+            "unique_pct": round(100.0 * unique / total_unique, 1),
         })
     rows.sort(key=lambda r: r["tokens"], reverse=True)
 
     all_agents: set[str] = set()
     for m in models.values():
         all_agents |= m["agents"]
+    tot_cache = sum(m["cache_read"] for m in models.values())
     rows.append({
         "model": "total (tracked)",
         "agents": len(all_agents),
         "tokens_in": sum(m["tokens_in"] for m in models.values()),
         "tokens_out": sum(m["tokens_out"] for m in models.values()),
         "tokens": total,
+        "cache_read": tot_cache,
+        "unique": total - tot_cache,
         "pct": 100.0,
         "out_pct": 100.0,
+        "unique_pct": 100.0,
     })
     return rows
 

@@ -192,6 +192,9 @@ def _as_agents(rows: list[dict]) -> list[dict]:
             "tokens": r["tokens"],
             "tokens_in": r["tokens_in"],
             "tokens_out": r["tokens_out"],
+            # cache-read (re-reads): cache_r for Claude, cachedReadTokens for a
+            # grok ledger, 0 for the grok gauge (no re-reads counted on disk).
+            "cache_read": int((r.get("cached") if r["kind"] == "grok" else r.get("cache_r")) or 0),
             "source": r["kind"],
             "exact": r.get("exact", True),
         }
@@ -227,6 +230,7 @@ def _as_token_log(rows: list[dict]) -> list[dict]:
             "tokens": r["tokens"],
             "tokens_in": r["tokens_in"],
             "tokens_out": r["tokens_out"],
+            "cache_read": int((r.get("cached") if r["kind"] == "grok" else r.get("cache_r")) or 0),
             "exact": r.get("exact", True),
         }
         if r["kind"] == "grok":
