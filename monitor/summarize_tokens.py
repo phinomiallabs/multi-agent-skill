@@ -38,13 +38,14 @@ def summarize(record: dict) -> list[dict]:
         key = entry.get("group") or entry.get("model", "unknown")
         g = groups.setdefault(key, {"group": key, "models": set(), "agents": 0,
                                     "tokens": 0, "tokens_in": 0, "tokens_out": 0,
-                                    "cache_read": 0})
+                                    "cache_read": 0, "elapsed_s": 0})
         g["models"].add(entry.get("model", "?"))
         g["agents"] += 1
         g["tokens"] += int(entry.get("tokens", 0))
         g["tokens_in"] += int(entry.get("tokens_in") or 0)
         g["tokens_out"] += int(entry.get("tokens_out") or 0)
         g["cache_read"] += int(entry.get("cache_read") or 0)
+        g["elapsed_s"] += int(entry.get("elapsed_s") or 0)
 
     total = sum(g["tokens"] for g in groups.values()) or 1
     # out_pct is the cache-neutral view: share of OUTPUT (generated) tokens,
@@ -65,6 +66,7 @@ def summarize(record: dict) -> list[dict]:
             "tokens": g["tokens"],
             "cache_read": g["cache_read"],
             "uncached": uncached,
+            "elapsed_s": g["elapsed_s"],
             "pct": round(100.0 * g["tokens"] / total, 1),
             "out_pct": round(100.0 * g["tokens_out"] / total_out, 1),
             "uncached_pct": round(100.0 * uncached / total_uncached, 1),
@@ -79,6 +81,7 @@ def summarize(record: dict) -> list[dict]:
         "tokens": total,
         "cache_read": tot_cache,
         "uncached": total - tot_cache,
+        "elapsed_s": sum(g["elapsed_s"] for g in groups.values()),
         "pct": 100.0,
         "out_pct": 100.0,
         "uncached_pct": 100.0,
@@ -93,12 +96,13 @@ def summarize_by_model(record: dict) -> list[dict]:
         key = entry.get("model") or "unknown"
         m = models.setdefault(key, {"model": key, "agents": set(),
                                     "tokens": 0, "tokens_in": 0, "tokens_out": 0,
-                                    "cache_read": 0})
+                                    "cache_read": 0, "elapsed_s": 0})
         m["agents"].add(entry.get("agent", "?"))
         m["tokens"] += int(entry.get("tokens", 0))
         m["tokens_in"] += int(entry.get("tokens_in") or 0)
         m["tokens_out"] += int(entry.get("tokens_out") or 0)
         m["cache_read"] += int(entry.get("cache_read") or 0)
+        m["elapsed_s"] += int(entry.get("elapsed_s") or 0)
 
     total = sum(m["tokens"] for m in models.values()) or 1
     total_out = sum(m["tokens_out"] for m in models.values()) or 1  # cache-neutral base
@@ -114,6 +118,7 @@ def summarize_by_model(record: dict) -> list[dict]:
             "tokens": m["tokens"],
             "cache_read": m["cache_read"],
             "uncached": uncached,
+            "elapsed_s": m["elapsed_s"],
             "pct": round(100.0 * m["tokens"] / total, 1),
             "out_pct": round(100.0 * m["tokens_out"] / total_out, 1),
             "uncached_pct": round(100.0 * uncached / total_uncached, 1),
@@ -132,6 +137,7 @@ def summarize_by_model(record: dict) -> list[dict]:
         "tokens": total,
         "cache_read": tot_cache,
         "uncached": total - tot_cache,
+        "elapsed_s": sum(m["elapsed_s"] for m in models.values()),
         "pct": 100.0,
         "out_pct": 100.0,
         "uncached_pct": 100.0,

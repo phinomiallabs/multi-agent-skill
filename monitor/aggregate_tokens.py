@@ -146,6 +146,7 @@ def collect(
                 "cached": info.get("cached"),
                 "model": info["model"],
                 "elapsed": info["elapsed"],
+                "elapsed_s": info.get("elapsed_s"),
                 "title": info["title"],
                 "cwd": str(resolved),
                 "path": info.get("path"),
@@ -200,6 +201,7 @@ def _as_agents(rows: list[dict]) -> list[dict]:
         }
         if r["kind"] == "grok":
             entry["elapsed"] = r.get("elapsed", "?")
+            entry["elapsed_s"] = r.get("elapsed_s")
             entry["title"] = r.get("title", "?")
             entry["session_id"] = r["name"]
         if r["kind"] == "nested":
@@ -235,6 +237,7 @@ def _as_token_log(rows: list[dict]) -> list[dict]:
         }
         if r["kind"] == "grok":
             entry["task"] = r.get("title", "")
+            entry["elapsed_s"] = r.get("elapsed_s")
             entry["session_id"] = r["name"]
         log.append(entry)
     return log
