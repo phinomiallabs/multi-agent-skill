@@ -107,6 +107,8 @@ CSS = """\
   .phase span{font-size:.75rem;color:var(--muted)}
   .note{color:var(--muted);font-size:.82rem;margin:.6rem 0 0}
   code{font:.85em ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--chip-wait);padding:.05rem .3rem;border-radius:4px}
+  .pie-group{font-size:.82rem;font-weight:600;color:var(--ink);margin:1.25rem 0 .7rem}
+  .pie-group:first-of-type{margin-top:.1rem}
   .pies{display:flex;flex-wrap:wrap;gap:1.5rem 2rem}
   .pie{flex:1 1 20rem;min-width:15rem;margin:0}
   .pie figcaption{font-size:.8rem;font-weight:600;color:var(--ink);margin:0 0 .7rem}
@@ -147,18 +149,20 @@ def fmt_compact(n: int) -> str:
     return f"{n / 1_000_000:.2f}M".replace(".00M", "M")
 
 
-def pie_slices(rows: list[dict], label_key: str) -> list[dict]:
+def pie_slices(rows: list[dict], label_key: str, value_key: str = "tokens") -> list[dict]:
     """Extract drawable slices from a token_summary/model_summary list.
 
-    Skips the appended "total (tracked)" row and any zero/non-numeric total.
-    Keeps record order (stable colour<->entity mapping); if there are more
-    than 8 groups, the smallest fold into a single grey "other" slot so a
-    9th hue is never invented (a data-viz non-negotiable).
+    `value_key` selects the slice measure — "tokens" (total) or "tokens_out"
+    (generated, cache-neutral). Skips the appended "total (tracked)" row and
+    any zero/non-numeric value. Keeps record order (stable colour<->entity
+    mapping, so an entity is the same colour in the total and generated
+    donuts); if there are more than 8 groups, the smallest fold into a single
+    grey "other" slot so a 9th hue is never invented (a data-viz non-negotiable).
     """
     items = [
-        {"label": str(r.get(label_key, "?")), "tokens": r["tokens"]}
+        {"label": str(r.get(label_key, "?")), "tokens": r[value_key]}
         for r in rows
-        if isinstance(r.get("tokens"), int) and r["tokens"] > 0
+        if isinstance(r.get(value_key), int) and r[value_key] > 0
         and not str(r.get(label_key, "")).strip().lower().startswith("total")
     ]
     if len(items) > 8:
@@ -174,7 +178,8 @@ def pie_slices(rows: list[dict], label_key: str) -> list[dict]:
     return items
 
 
-def donut(items: list[dict], caption: str, size: int = 168, thick: int = 26) -> str:
+def donut(items: list[dict], caption: str, size: int = 168, thick: int = 26,
+          center_label: str = "total tokens") -> str:
     """Inline-SVG donut: one dash-arc <circle> per slice, transparent 2px
     gaps that reveal the panel surface, total in the hole. Colours are CSS
     vars (--s1..--s8 / --muted) so they swap with the light/dark theme."""
@@ -208,7 +213,7 @@ def donut(items: list[dict], caption: str, size: int = 168, thick: int = 26) -> 
         f'{esc(fmt_compact(total))}</text>'
         f'<text x="{center}" y="{center + 18}" text-anchor="middle" '
         f'style="fill:var(--muted);font:.66rem system-ui,sans-serif;'
-        f'letter-spacing:.04em">total tokens</text></svg>'
+        f'letter-spacing:.04em">{esc(center_label)}</text></svg>'
     )
 
 
@@ -224,12 +229,13 @@ def legend(items: list[dict]) -> str:
     return f'    <ul class="legend">\n{lis}\n    </ul>'
 
 
-def pie_figure(items: list[dict], caption: str) -> str:
+def pie_figure(items: list[dict], caption: str,
+               center_label: str = "total tokens") -> str:
     return (
         f'    <figure class="pie">\n'
         f'      <figcaption>{esc(caption)}</figcaption>\n'
         f'      <div class="pie-body">\n'
-        f'      {donut(items, caption)}\n'
+        f'      {donut(items, caption, center_label=center_label)}\n'
         f'{legend(items)}\n'
         f'      </div>\n'
         f'    </figure>'
@@ -328,28 +334,45 @@ def render(record: dict) -> str:
   </section>
 """
 
-    # Donut charts visualising token distribution by role and by model,
-    # from the same summaries that back the breakdown tables below.
-    pie_figs = []
-    if record.get("token_summary"):
-        role_items = pie_slices(record["token_summary"], "group")
-        if role_items:
-            pie_figs.append(pie_figure(role_items, "By role"))
-    if record.get("model_summary"):
-        model_items = pie_slices(record["model_summary"], "model")
-        if model_items:
-            pie_figs.append(pie_figure(model_items, "By model"))
+    # Donut charts by role and by model, on two measures: total tokens and —
+    # the cache-neutral view — generated (output) tokens a.k.a. Gen. share.
+    # Both draw from the same summaries; an entity keeps its colour across the
+    # two rows because pie_slices preserves record order.
+    def _pies(value_key: str, center_label: str) -> list[str]:
+        figs = []
+        if record.get("token_summary"):
+            items = pie_slices(record["token_summary"], "group", value_key)
+            if items:
+                figs.append(pie_figure(items, "By role", center_label))
+        if record.get("model_summary"):
+            items = pie_slices(record["model_summary"], "model", value_key)
+            if items:
+                figs.append(pie_figure(items, "By model", center_label))
+        return figs
+
+    total_figs = _pies("tokens", "total tokens")
+    gen_figs = _pies("tokens_out", "output tokens")
     pie_section = ""
-    if pie_figs:
-        figs = "\n".join(pie_figs)
+    if total_figs or gen_figs:
+        blocks = ""
+        if total_figs:
+            blocks += f"""    <h3 class="pie-group">Total tokens</h3>
+    <div class="pies">
+{chr(10).join(total_figs)}
+    </div>
+    <p class="note">Slices are <b>total tokens</b>. Claude totals include cache-read tokens (context re-read every call) that inflate them next to grok — the cache-neutral view is below.</p>
+"""
+        if gen_figs:
+            blocks += f"""    <h3 class="pie-group">Generated tokens · cache-neutral (Gen.&nbsp;share)</h3>
+    <div class="pies">
+{chr(10).join(gen_figs)}
+    </div>
+    <p class="note">Slices are <b>output (generated) tokens</b> — neither provider inflates output, so this is the fair share of work. Matches the <b>Gen.&nbsp;share</b> column below.</p>
+"""
         pie_section = f"""
   <section>
     <h2>Token distribution</h2>
-    <div class="pies">
-{figs}
-    </div>
-    <p class="note">Slices are <b>total tokens</b>. Claude totals include cache-read tokens (context re-read every call) that inflate them next to grok — see the cache-neutral <b>Gen.&nbsp;share</b> column below.</p>
-  </section>
+{blocks}  </section>
 """
 
     total = sum(a["tokens"] for a in record.get("agents", []) if isinstance(a.get("tokens"), int))
