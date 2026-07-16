@@ -10,7 +10,7 @@ lives in [`SKILL.md`](SKILL.md).
 Run
 
 ```
-`/multi-agent-skill` 
+/multi-agent-skill
 
 * Spec
 * Plans/tickets/issues
