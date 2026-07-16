@@ -32,17 +32,19 @@ Record schema (all string fields are plain text; they are HTML-escaped here):
   "environment": [["Repo", "/path @ sha"], ["Spec", "docs/..."]],
   "token_summary": [   # optional; written by summarize_tokens.py.
                        # Renders the "by role" donut + breakdown table.
+                       # pct = share of total tokens; out_pct = cache-neutral
+                       # share of output tokens.
     {"group": "investigation", "models": "Sonnet", "agents": 2,
-     "tokens_in": 1000, "tokens_out": 100, "tokens": 1100, "pct": 40.0},
+     "tokens_in": 1000, "tokens_out": 100, "tokens": 1100, "pct": 40.0, "out_pct": 40.0},
     {"group": "total (tracked)", "models": "", "agents": 5,
-     "tokens_in": 2500, "tokens_out": 250, "tokens": 2750, "pct": 100.0}
+     "tokens_in": 2500, "tokens_out": 250, "tokens": 2750, "pct": 100.0, "out_pct": 100.0}
   ],
   "model_summary": [   # optional; written by summarize_tokens.py.
                        # Renders the "by model" donut + breakdown table.
     {"model": "Sonnet", "agents": 3,
-     "tokens_in": 2000, "tokens_out": 200, "tokens": 2200, "pct": 80.0},
+     "tokens_in": 2000, "tokens_out": 200, "tokens": 2200, "pct": 80.0, "out_pct": 80.0},
     {"model": "total (tracked)", "agents": 5,
-     "tokens_in": 2500, "tokens_out": 250, "tokens": 2750, "pct": 100.0}
+     "tokens_in": 2500, "tokens_out": 250, "tokens": 2750, "pct": 100.0, "out_pct": 100.0}
   ]
 }
 """
@@ -260,6 +262,16 @@ def render(record: dict) -> str:
         value = s.get(key)
         return f"{int(value):,}" if isinstance(value, int) else "—"
 
+    def _share(s: dict, key: str) -> str:
+        value = s.get(key)
+        return f"{value}%" if value is not None else "—"
+
+    # Cache-neutral note shared by the two breakdown tables.
+    share_note = ('<p class="note">Share = % of all tracked tokens. '
+                  'Gen.&nbsp;share = % of output (generated) tokens — cache-neutral: '
+                  "Claude totals include cache-read tokens (context re-read every "
+                  "call) that inflate them; grok's do not.</p>")
+
     # Optional by-role breakdown written by summarize_tokens.py.
     summary_section = ""
     if record.get("token_summary"):
@@ -269,7 +281,8 @@ def render(record: dict) -> str:
             f'<td class="num">{_opt(s, "tokens_in")}</td>'
             f'<td class="num">{_opt(s, "tokens_out")}</td>'
             f'<td class="num">{int(s["tokens"]):,}</td>'
-            f'<td class="num">{esc(s["pct"])}%</td></tr>'
+            f'<td class="num">{esc(s["pct"])}%</td>'
+            f'<td class="num">{_share(s, "out_pct")}</td></tr>'
             for s in record["token_summary"]
         )
         summary_section = f"""
@@ -277,12 +290,13 @@ def render(record: dict) -> str:
     <h2>Token breakdown by role</h2>
     <div class="wrap">
     <table>
-      <thead><tr><th>Role</th><th>Model(s)</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th></tr></thead>
+      <thead><tr><th>Role</th><th>Model(s)</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th></tr></thead>
       <tbody>
 {srows}
       </tbody>
     </table>
     </div>
+    {share_note}
   </section>
 """
 
@@ -295,7 +309,8 @@ def render(record: dict) -> str:
             f'<td class="num">{_opt(s, "tokens_in")}</td>'
             f'<td class="num">{_opt(s, "tokens_out")}</td>'
             f'<td class="num">{int(s["tokens"]):,}</td>'
-            f'<td class="num">{esc(s["pct"])}%</td></tr>'
+            f'<td class="num">{esc(s["pct"])}%</td>'
+            f'<td class="num">{_share(s, "out_pct")}</td></tr>'
             for s in record["model_summary"]
         )
         model_summary_section = f"""
@@ -303,12 +318,13 @@ def render(record: dict) -> str:
     <h2>Token breakdown by model</h2>
     <div class="wrap">
     <table>
-      <thead><tr><th>Model</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th></tr></thead>
+      <thead><tr><th>Model</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th></tr></thead>
       <tbody>
 {mrows}
       </tbody>
     </table>
     </div>
+    {share_note}
   </section>
 """
 
@@ -332,6 +348,7 @@ def render(record: dict) -> str:
     <div class="pies">
 {figs}
     </div>
+    <p class="note">Slices are <b>total tokens</b>. Claude totals include cache-read tokens (context re-read every call) that inflate them next to grok — see the cache-neutral <b>Gen.&nbsp;share</b> column below.</p>
   </section>
 """
 

@@ -45,6 +45,10 @@ def summarize(record: dict) -> list[dict]:
         g["tokens_out"] += int(entry.get("tokens_out") or 0)
 
     total = sum(g["tokens"] for g in groups.values()) or 1
+    # out_pct is the cache-neutral view: share of OUTPUT (generated) tokens,
+    # which neither provider inflates — unlike `pct` (share of total tokens),
+    # where Claude's cache-read tokens dominate the denominator.
+    total_out = sum(g["tokens_out"] for g in groups.values()) or 1
     rows = []
     for g in groups.values():
         rows.append({
@@ -55,6 +59,7 @@ def summarize(record: dict) -> list[dict]:
             "tokens_out": g["tokens_out"],
             "tokens": g["tokens"],
             "pct": round(100.0 * g["tokens"] / total, 1),
+            "out_pct": round(100.0 * g["tokens_out"] / total_out, 1),
         })
     rows.append({
         "group": "total (tracked)",
@@ -64,6 +69,7 @@ def summarize(record: dict) -> list[dict]:
         "tokens_out": sum(g["tokens_out"] for g in groups.values()),
         "tokens": total,
         "pct": 100.0,
+        "out_pct": 100.0,
     })
     return rows
 
@@ -81,6 +87,7 @@ def summarize_by_model(record: dict) -> list[dict]:
         m["tokens_out"] += int(entry.get("tokens_out") or 0)
 
     total = sum(m["tokens"] for m in models.values()) or 1
+    total_out = sum(m["tokens_out"] for m in models.values()) or 1  # cache-neutral base
     rows = []
     for m in models.values():
         rows.append({
@@ -90,6 +97,7 @@ def summarize_by_model(record: dict) -> list[dict]:
             "tokens_out": m["tokens_out"],
             "tokens": m["tokens"],
             "pct": round(100.0 * m["tokens"] / total, 1),
+            "out_pct": round(100.0 * m["tokens_out"] / total_out, 1),
         })
     rows.sort(key=lambda r: r["tokens"], reverse=True)
 
@@ -103,6 +111,7 @@ def summarize_by_model(record: dict) -> list[dict]:
         "tokens_out": sum(m["tokens_out"] for m in models.values()),
         "tokens": total,
         "pct": 100.0,
+        "out_pct": 100.0,
     })
     return rows
 
@@ -125,21 +134,21 @@ def _summary_note(token_summary: list | dict | None) -> str | None:
 
 
 def print_table(rows: list[dict]) -> None:
-    fmt = "{:<28} {:<38} {:>7} {:>12} {:>12} {:>12} {:>7}"
-    print(fmt.format("Role", "Model(s)", "Agents", "In", "Out", "Total", "%"))
+    fmt = "{:<28} {:<38} {:>7} {:>12} {:>12} {:>12} {:>7} {:>7}"
+    print(fmt.format("Role", "Model(s)", "Agents", "In", "Out", "Total", "Tot%", "Gen%"))
     for r in rows:
         print(fmt.format(r["group"], r["models"], r["agents"],
                          f"{r.get('tokens_in', 0):,}", f"{r.get('tokens_out', 0):,}",
-                         f"{r['tokens']:,}", f"{r['pct']}%"))
+                         f"{r['tokens']:,}", f"{r['pct']}%", f"{r.get('out_pct', '—')}%"))
 
 
 def print_model_table(rows: list[dict]) -> None:
-    fmt = "{:<28} {:>7} {:>12} {:>12} {:>12} {:>7}"
-    print(fmt.format("Model", "Agents", "In", "Out", "Total", "%"))
+    fmt = "{:<28} {:>7} {:>12} {:>12} {:>12} {:>7} {:>7}"
+    print(fmt.format("Model", "Agents", "In", "Out", "Total", "Tot%", "Gen%"))
     for r in rows:
         print(fmt.format(r["model"], r["agents"],
                          f"{r.get('tokens_in', 0):,}", f"{r.get('tokens_out', 0):,}",
-                         f"{r['tokens']:,}", f"{r['pct']}%"))
+                         f"{r['tokens']:,}", f"{r['pct']}%", f"{r.get('out_pct', '—')}%"))
 
 
 def main() -> None:

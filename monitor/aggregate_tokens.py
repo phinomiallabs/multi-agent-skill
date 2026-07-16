@@ -32,7 +32,7 @@ from pathlib import Path
 # Same-directory imports (this package is invoked as scripts, not installed).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from claude_tokens import transcript_usage  # noqa: E402
-from grok_tokens import session_info, sessions_for_cwd  # noqa: E402
+from grok_tokens import grok_sessions_for_cwd  # noqa: E402
 
 ADVISOR_ROOT = Path.home() / ".claude" / "projects"
 TASKS_ROOT = Path("/tmp/claude-1000")
@@ -129,23 +129,26 @@ def collect(
         path=str(tdir) if tdir.is_dir() else None,
     ))
 
-    # (c) Grok sessions per repo cwd
+    # (c) Grok sessions per repo cwd (deduped; exact ledger preferred, gauge
+    # fallback, subagent children rolled up without double-counting).
     for cwd in repo_cwds:
         resolved = cwd.resolve()
-        for session_dir in sessions_for_cwd(resolved):
-            info = session_info(session_dir)
+        for info in grok_sessions_for_cwd(resolved):
             rows.append({
                 "kind": "grok",
                 "name": info["id"],
-                "tokens_in": info["tokens_in"] if info["tokens_in"] is not None else 0,
-                "tokens_out": info["tokens_out"] if info["tokens_out"] is not None else 0,
-                "tokens": info["tokens"] if info["tokens"] is not None else 0,
-                "exact": False,  # in/out estimated; total is exact
+                "tokens_in": info["tokens_in"] or 0,
+                "tokens_out": info["tokens_out"] or 0,
+                "tokens": info["tokens"] or 0,
+                # exact when read from the additive ledger; gauge/estimate else.
+                "exact": info.get("exact", False),
+                "basis": info.get("basis"),
+                "cached": info.get("cached"),
                 "model": info["model"],
                 "elapsed": info["elapsed"],
                 "title": info["title"],
                 "cwd": str(resolved),
-                "path": str(session_dir),
+                "path": info.get("path"),
             })
 
     totals = {
