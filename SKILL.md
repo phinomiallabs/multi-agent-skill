@@ -16,7 +16,7 @@ You are the advisor. Your job is to orchestrate and verify.
 
 ## Workflow
 
-1. The advisor reads the spec and plan. After that,
+1. The advisor reads the spec, plan and (optional) instructions. After that,
     * Divide the work into investigation, implementation, and verification
     * Assign investigation work (e.g. scoping, reading the codebase) to the investigator subagents and implementation work (e.g. coding) to the implementer subagents. 
 2. The advisor launches investigator subagents to finish investigation.
@@ -53,8 +53,7 @@ You are the advisor. Your job is to orchestrate and verify.
     -------------------------------------------------
     -----   SHARED MESSAGE FOR ALL SUBAGENTS   ------
     -------------------------------------------------
-    Read @../agent_docs/README.md
-    Pay special attention to ## Planning in @../agent_docs/GUIDELINES.md
+    Read [(optional) instructions]
     Scope your tasks. Protect your context window. Subagents are a good tool to protect your context window, among other uses. 
     You can launch subagents of your own. So can their subagents. Each subagent can launch its subagents.
     Model selection guide
@@ -68,7 +67,7 @@ You are the advisor. Your job is to orchestrate and verify.
     -----         END OF SHARED MESSAGE        ------
     -------------------------------------------------
     """
-    Fill in the model names.
+    Fill in the model names and (optional) instructions.
 
 
 ## Monitoring
