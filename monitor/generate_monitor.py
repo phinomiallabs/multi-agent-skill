@@ -30,22 +30,29 @@ Record schema (all string fields are plain text; they are HTML-escaped here):
   "agents_note": "footnote under the agents table (optional)",
   "gate_note":   "footnote under the phases block (optional)",
   "environment": [["Repo", "/path @ sha"], ["Spec", "docs/..."]],
-  "token_summary": [   # optional; written by summarize_tokens.py.
-                       # Renders the "by role" donut + breakdown table.
-                       # pct = share of total tokens; out_pct = cache-neutral
-                       # share of output tokens.
+  "token_summary": [   # optional; written by summarize_tokens.py from token_log.
+                       # Renders the "by role" donuts + breakdown table.
+                       # pct=share of total; out_pct=share of output (generated);
+                       # uncached=tokens-cache_read; uncached_pct=share of uncached.
     {"group": "investigation", "models": "Sonnet", "agents": 2,
-     "tokens_in": 1000, "tokens_out": 100, "tokens": 1100, "pct": 40.0, "out_pct": 40.0},
+     "tokens_in": 1000, "tokens_out": 100, "tokens": 1100, "cache_read": 800,
+     "uncached": 300, "pct": 40.0, "out_pct": 40.0, "uncached_pct": 42.0},
     {"group": "total (tracked)", "models": "", "agents": 5,
-     "tokens_in": 2500, "tokens_out": 250, "tokens": 2750, "pct": 100.0, "out_pct": 100.0}
+     "tokens_in": 2500, "tokens_out": 250, "tokens": 2750, "cache_read": 2000,
+     "uncached": 750, "pct": 100.0, "out_pct": 100.0, "uncached_pct": 100.0}
   ],
   "model_summary": [   # optional; written by summarize_tokens.py.
-                       # Renders the "by model" donut + breakdown table.
+                       # Renders the "by model" donuts + breakdown table.
     {"model": "Sonnet", "agents": 3,
-     "tokens_in": 2000, "tokens_out": 200, "tokens": 2200, "pct": 80.0, "out_pct": 80.0},
+     "tokens_in": 2000, "tokens_out": 200, "tokens": 2200, "cache_read": 1800,
+     "uncached": 400, "pct": 80.0, "out_pct": 80.0, "uncached_pct": 53.0},
     {"model": "total (tracked)", "agents": 5,
-     "tokens_in": 2500, "tokens_out": 250, "tokens": 2750, "pct": 100.0, "out_pct": 100.0}
-  ]
+     "tokens_in": 2500, "tokens_out": 250, "tokens": 2750, "cache_read": 2000,
+     "uncached": 750, "pct": 100.0, "out_pct": 100.0, "uncached_pct": 100.0}
+  ],
+  # Per-agent cache_read (Claude cache_read_input_tokens; grok 0 for the gauge,
+  # cachedReadTokens for a ledger) is recorded by aggregate_tokens.py on each
+  # agents/token_log entry, so the uncached views regenerate with no backfill.
 }
 """
 
@@ -257,7 +264,7 @@ def comp_bars(rows: list[dict], label_key: str) -> str:
     """Stacked composition bars: each summary row's total broken into input
     (processed once) + output + cache-read (re-reads, hatched). Bar length is
     total, on one shared scale, so the cache-read chunk is visible against the
-    solid 'unique' part. Rows without cache data (grok) render all-solid."""
+    solid 'uncached' part. Rows without cache data (grok) render all-solid."""
     data = [r for r in rows
             if isinstance(r.get("tokens"), int) and r["tokens"] > 0
             and not str(r.get(label_key, "")).strip().lower().startswith("total")]
@@ -284,7 +291,7 @@ def comp_bars(rows: list[dict], label_key: str) -> str:
             f'      <div class="comp-row"><span class="comp-lab">{esc(r[label_key])}</span>'
             f'<span class="comp-track"><span class="comp-bar" style="width:{100.0 * tot / maxtot:.2f}%">'
             f'{segs}</span></span>'
-            f'<span class="comp-val">{esc(fmt_compact(tot))} · unique '
+            f'<span class="comp-val">{esc(fmt_compact(tot))} · uncached '
             f'{esc(fmt_compact(tot - cr))}</span></div>'
         )
     legend_html = (
@@ -292,7 +299,7 @@ def comp_bars(rows: list[dict], label_key: str) -> str:
         '<span><i style="background:var(--s1)"></i>input (once)</span>'
         '<span><i style="background:var(--s2)"></i>output</span>'
         '<span><i class="seg-cache"></i>cache-read (re-reads)</span>'
-        '<span>solid = unique (total &minus; cache-read)</span></div>'
+        '<span>solid = uncached (total &minus; cache-read)</span></div>'
     )
     return "\n".join(rows_html) + "\n" + legend_html
 
@@ -330,10 +337,10 @@ def render(record: dict) -> str:
     # Cache-neutral note shared by the two breakdown tables.
     share_note = ('<p class="note">Share = % of all tracked tokens. '
                   'Gen.&nbsp;share = % of output (generated) tokens. '
-                  'Unique = total &minus; cache-read tokens (context re-read every '
-                  "call), i.e. tokens processed once. Claude's totals are dominated "
-                  "by cache-reads; grok exposes none on disk, so grok's unique = its "
-                  'total.</p>')
+                  'Uncached = total &minus; cache-read tokens (context re-read every '
+                  "call), i.e. tokens not served from cache. Claude's totals are "
+                  "dominated by cache-reads; grok exposes none on disk, so grok's "
+                  'uncached = its total.</p>')
 
     # Optional by-role breakdown written by summarize_tokens.py.
     summary_section = ""
@@ -346,7 +353,7 @@ def render(record: dict) -> str:
             f'<td class="num">{int(s["tokens"]):,}</td>'
             f'<td class="num">{esc(s["pct"])}%</td>'
             f'<td class="num">{_share(s, "out_pct")}</td>'
-            f'<td class="num">{_opt(s, "unique")}</td></tr>'
+            f'<td class="num">{_opt(s, "uncached")}</td></tr>'
             for s in record["token_summary"]
         )
         summary_section = f"""
@@ -354,7 +361,7 @@ def render(record: dict) -> str:
     <h2>Token breakdown by role</h2>
     <div class="wrap">
     <table>
-      <thead><tr><th>Role</th><th>Model(s)</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th><th class="num">Unique&nbsp;(&minus;cache)</th></tr></thead>
+      <thead><tr><th>Role</th><th>Model(s)</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th><th class="num">Uncached&nbsp;(&minus;cache)</th></tr></thead>
       <tbody>
 {srows}
       </tbody>
@@ -375,7 +382,7 @@ def render(record: dict) -> str:
             f'<td class="num">{int(s["tokens"]):,}</td>'
             f'<td class="num">{esc(s["pct"])}%</td>'
             f'<td class="num">{_share(s, "out_pct")}</td>'
-            f'<td class="num">{_opt(s, "unique")}</td></tr>'
+            f'<td class="num">{_opt(s, "uncached")}</td></tr>'
             for s in record["model_summary"]
         )
         model_summary_section = f"""
@@ -383,7 +390,7 @@ def render(record: dict) -> str:
     <h2>Token breakdown by model</h2>
     <div class="wrap">
     <table>
-      <thead><tr><th>Model</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th><th class="num">Unique&nbsp;(&minus;cache)</th></tr></thead>
+      <thead><tr><th>Model</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th><th class="num">Uncached&nbsp;(&minus;cache)</th></tr></thead>
       <tbody>
 {mrows}
       </tbody>
@@ -411,9 +418,9 @@ def render(record: dict) -> str:
 
     total_figs = _pies("tokens", "total tokens")
     gen_figs = _pies("tokens_out", "output tokens")
-    unique_figs = _pies("unique", "unique tokens")
+    uncached_figs = _pies("uncached", "uncached tokens")
     pie_section = ""
-    if total_figs or gen_figs or unique_figs:
+    if total_figs or gen_figs or uncached_figs:
         blocks = ""
         if total_figs:
             blocks += f"""    <h3 class="pie-group">Total tokens</h3>
@@ -429,12 +436,12 @@ def render(record: dict) -> str:
     </div>
     <p class="note">Slices are <b>output (generated) tokens</b> — neither provider inflates output, so this is the fair share of work. Matches the <b>Gen.&nbsp;share</b> column below.</p>
 """
-        if unique_figs:
-            blocks += f"""    <h3 class="pie-group">Unique tokens · total &minus; cache-reads</h3>
+        if uncached_figs:
+            blocks += f"""    <h3 class="pie-group">Uncached tokens · total &minus; cache-reads</h3>
     <div class="pies">
-{chr(10).join(unique_figs)}
+{chr(10).join(uncached_figs)}
     </div>
-    <p class="note">Slices are <b>unique tokens</b> (total &minus; cache-reads) — tokens processed once, crediting real input work that output-only drops. Matches the <b>Unique</b> column below.</p>
+    <p class="note">Slices are <b>uncached tokens</b> (total &minus; cache-reads) — tokens processed once (not served from cache), crediting real input work that output-only drops. Matches the <b>Uncached</b> column below.</p>
 """
         pie_section = f"""
   <section>
@@ -443,7 +450,7 @@ def render(record: dict) -> str:
 """
 
     # Composition bars decompose each total into input/output/cache-read, so
-    # the cache-read chunk that "unique" removes is visible against the solid bar.
+    # the cache-read chunk that "uncached" removes is visible against the solid bar.
     cblocks = ""
     if record.get("model_summary"):
         bars = comp_bars(record["model_summary"], "model")
@@ -457,8 +464,8 @@ def render(record: dict) -> str:
     if cblocks:
         comp_section = f"""
   <section>
-    <h2>Token composition · unique vs cache-reads</h2>
-    <p class="note">Bar length = total tokens (all bars share one scale). The hatched part is cache-read re-reads; the solid part is <b>unique</b> (total &minus; cache-read). Grok exposes no cache-read on disk, so its bar is all solid.</p>
+    <h2>Token composition · uncached vs cache-reads</h2>
+    <p class="note">Bar length = total tokens (all bars share one scale). The hatched part is cache-read re-reads; the solid part is <b>uncached</b> (total &minus; cache-read). Grok exposes no cache-read on disk, so its bar is all solid.</p>
 {cblocks}  </section>
 """
 
