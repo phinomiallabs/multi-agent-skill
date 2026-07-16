@@ -1,6 +1,6 @@
 ---
 name: multi-agent-skill
-description: Delegates implementation work from specifications and plans to non-Claude models while Claude remains responsible for orchestration. Use when the user provides specification, implementation-plan, design, requirements, or task files and asks Claude to implement them, execute the plan, allocate work to Grok, or use Grok as an implementation worker through grok-agent.
+description: Delegates implementation work from specifications and plans to non-Claude models while Claude remains responsible for orchestration. Use when the user provides specification, implementation-plan, design, requirements, or task files and asks Claude to implement them, execute the plan, and allocate work to non-Claude models.
 ---
 
 # Multi-agent-skill

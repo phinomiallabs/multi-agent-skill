@@ -5,6 +5,23 @@ that plans the work, delegates implementation and investigation to non-Claude
 subagents (e.g. Grok), and adversarially verifies the results. The full workflow
 lives in [`SKILL.md`](SKILL.md).
 
+## Quick start
+
+Run
+
+```
+`/multi-agent-skill` 
+
+* Spec
+* Plans/tickets/issues
+* Implementer model
+* Investigator model
+* (Optional) intructions: markdowns, htmls, etc.
+
+```
+
+Fill in the bullets. 
+
 ## Roles
 
 - **Advisor** (Claude) — orchestrates, designs tests, and adversarially verifies. Doesn't write code itself.
