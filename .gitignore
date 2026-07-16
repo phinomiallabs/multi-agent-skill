@@ -1,0 +1,20 @@
+# Per-run records and artifacts — may contain sensitive repo paths,
+# project names, session ids, and generated code. Never commit.
+runs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
