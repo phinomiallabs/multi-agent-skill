@@ -53,10 +53,6 @@ Record schema (all string fields are plain text; they are HTML-escaped here):
   # Per-agent cache_read (Claude cache_read_input_tokens; grok 0 for the gauge,
   # cachedReadTokens for a ledger) is recorded by aggregate_tokens.py on each
   # agents/token_log entry, so the uncached views regenerate with no backfill.
-  # token_log entries also carry elapsed_s (int seconds, per-agent run time);
-  # summarize_tokens.py sums it into token_summary/model_summary, driving the
-  # "Time spent · agent-time" donuts (0 / omitted for overlapping aggregates
-  # like the session-long advisor and nested groups).
 }
 """
 
@@ -171,18 +167,6 @@ def fmt_compact(n: int) -> str:
     return f"{n / 1_000_000:.2f}M".replace(".00M", "M")
 
 
-def fmt_duration(seconds: int) -> str:
-    """Seconds -> compact duration ('55s', '9m 18s', '1h 01m')."""
-    s = int(round(seconds))
-    if s < 60:
-        return f"{s}s"
-    m, sec = divmod(s, 60)
-    if m < 60:
-        return f"{m}m {sec:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h {m:02d}m"
-
-
 def pie_slices(rows: list[dict], label_key: str, value_key: str = "tokens") -> list[dict]:
     """Extract drawable slices from a token_summary/model_summary list.
 
@@ -193,44 +177,30 @@ def pie_slices(rows: list[dict], label_key: str, value_key: str = "tokens") -> l
     donuts); if there are more than 8 groups, the smallest fold into a single
     grey "other" slot so a 9th hue is never invented (a data-viz non-negotiable).
     """
-    # Colour follows the entity's position in the FULL summary (not the filtered
-    # index), so an entity keeps its hue across every donut even when some rows
-    # are dropped for having a zero value on this measure (e.g. the advisor has
-    # 0 elapsed time). `_idx` carries that canonical position.
-    base = [r for r in rows
-            if not str(r.get(label_key, "")).strip().lower().startswith("total")]
     items = [
-        {"label": str(r.get(label_key, "?")), "tokens": r[value_key], "_idx": idx}
-        for idx, r in enumerate(base)
+        {"label": str(r.get(label_key, "?")), "tokens": r[value_key]}
+        for r in rows
         if isinstance(r.get(value_key), int) and r[value_key] > 0
+        and not str(r.get(label_key, "")).strip().lower().startswith("total")
     ]
-    if len(base) > 8:
-        # too many entities for stable per-entity colours: keep the 7 largest,
-        # fold the rest into a grey "other", and colour sequentially.
-        items.sort(key=lambda it: it["tokens"], reverse=True)
-        head, tail = items[:7], items[7:]
-        folded = sum(it["tokens"] for it in tail)
-        for i, it in enumerate(head):
-            it["_idx"] = i
-        items = head + ([{"label": "other", "tokens": folded, "other": True, "_idx": 7}]
-                        if folded else [])
+    if len(items) > 8:
+        keep = set(sorted(range(len(items)), key=lambda i: items[i]["tokens"],
+                          reverse=True)[:7])
+        folded = sum(it["tokens"] for i, it in enumerate(items) if i not in keep)
+        items = [it for i, it in enumerate(items) if i in keep]
+        items.append({"label": "other", "tokens": folded, "other": True})
     total = sum(it["tokens"] for it in items) or 1
-    for it in items:
-        it["slot"] = "muted" if it.get("other") else str((it["_idx"] % 8) + 1)
+    for i, it in enumerate(items):
+        it["slot"] = "muted" if it.get("other") else str((i % 8) + 1)
         it["pct"] = 100.0 * it["tokens"] / total
     return items
 
 
-def _tokens_tip(v: int) -> str:
-    return f"{v:,} tokens"
-
-
 def donut(items: list[dict], caption: str, size: int = 168, thick: int = 26,
-          center_label: str = "total tokens", fmt=fmt_compact, tip=_tokens_tip) -> str:
+          center_label: str = "total tokens") -> str:
     """Inline-SVG donut: one dash-arc <circle> per slice, transparent 2px
     gaps that reveal the panel surface, total in the hole. Colours are CSS
-    vars (--s1..--s8 / --muted) so they swap with the light/dark theme. `fmt`
-    formats the centre/legend magnitude; `tip` formats the hover tooltip."""
+    vars (--s1..--s8 / --muted) so they swap with the light/dark theme."""
     total = sum(it["tokens"] for it in items) or 1
     r = (size - thick) / 2
     center = size / 2
@@ -246,7 +216,7 @@ def donut(items: list[dict], caption: str, size: int = 168, thick: int = 26,
             f'pathLength="100" stroke-width="{thick}" style="stroke:var({var})" '
             f'stroke-dasharray="{dash:.3f} {100 - dash:.3f}" '
             f'stroke-dashoffset="{-cum:.3f}">'
-            f'<title>{esc(it["label"])} — {esc(tip(it["tokens"]))} '
+            f'<title>{esc(it["label"])} — {it["tokens"]:,} tokens '
             f'({it["pct"]:.1f}%)</title></circle>'
         )
         cum += seg
@@ -258,33 +228,33 @@ def donut(items: list[dict], caption: str, size: int = 168, thick: int = 26,
         f'<text x="{center}" y="{center}" text-anchor="middle" '
         f'dominant-baseline="central" '
         f'style="fill:var(--ink);font:600 1.15rem system-ui,sans-serif">'
-        f'{esc(fmt(total))}</text>'
+        f'{esc(fmt_compact(total))}</text>'
         f'<text x="{center}" y="{center + 18}" text-anchor="middle" '
         f'style="fill:var(--muted);font:.66rem system-ui,sans-serif;'
         f'letter-spacing:.04em">{esc(center_label)}</text></svg>'
     )
 
 
-def legend(items: list[dict], fmt=fmt_compact) -> str:
+def legend(items: list[dict]) -> str:
     lis = "\n".join(
         f'      <li><span class="sw" style="background:var('
         f'{"--muted" if it["slot"] == "muted" else f"--s{it['slot']}"})"></span>'
         f'<span class="lab">{esc(it["label"])}</span>'
-        f'<span class="val">{esc(fmt(it["tokens"]))} · '
+        f'<span class="val">{esc(fmt_compact(it["tokens"]))} · '
         f'{it["pct"]:.0f}%</span></li>'
         for it in items
     )
     return f'    <ul class="legend">\n{lis}\n    </ul>'
 
 
-def pie_figure(items: list[dict], caption: str, center_label: str = "total tokens",
-               fmt=fmt_compact, tip=_tokens_tip) -> str:
+def pie_figure(items: list[dict], caption: str,
+               center_label: str = "total tokens") -> str:
     return (
         f'    <figure class="pie">\n'
         f'      <figcaption>{esc(caption)}</figcaption>\n'
         f'      <div class="pie-body">\n'
-        f'      {donut(items, caption, center_label=center_label, fmt=fmt, tip=tip)}\n'
-        f'{legend(items, fmt)}\n'
+        f'      {donut(items, caption, center_label=center_label)}\n'
+        f'{legend(items)}\n'
         f'      </div>\n'
         f'    </figure>'
     )
@@ -434,16 +404,16 @@ def render(record: dict) -> str:
     # the cache-neutral view — generated (output) tokens a.k.a. Gen. share.
     # Both draw from the same summaries; an entity keeps its colour across the
     # two rows because pie_slices preserves record order.
-    def _pies(value_key: str, center_label: str, fmt=fmt_compact, tip=_tokens_tip) -> list[str]:
+    def _pies(value_key: str, center_label: str) -> list[str]:
         figs = []
         if record.get("token_summary"):
             items = pie_slices(record["token_summary"], "group", value_key)
             if items:
-                figs.append(pie_figure(items, "By role", center_label, fmt, tip))
+                figs.append(pie_figure(items, "By role", center_label))
         if record.get("model_summary"):
             items = pie_slices(record["model_summary"], "model", value_key)
             if items:
-                figs.append(pie_figure(items, "By model", center_label, fmt, tip))
+                figs.append(pie_figure(items, "By model", center_label))
         return figs
 
     total_figs = _pies("tokens", "total tokens")
@@ -499,21 +469,6 @@ def render(record: dict) -> str:
 {cblocks}  </section>
 """
 
-    # Time-spent donuts (by role + by model) on agent-time: the sum of each
-    # agent's own duration. Agents run concurrently, so this exceeds wall-clock.
-    time_figs = _pies("elapsed_s", "agent-time", fmt=fmt_duration, tip=fmt_duration)
-    time_section = ""
-    if time_figs:
-        time_section = f"""
-  <section>
-    <h2>Time spent · agent-time</h2>
-    <div class="pies">
-{chr(10).join(time_figs)}
-    </div>
-    <p class="note"><b>Agent-time</b> = the sum of each agent's own run duration. Agents run concurrently, so this exceeds wall-clock — it measures total work time, not elapsed time. Agents with no measured duration (the session-long advisor, aggregated nested groups) are omitted.</p>
-  </section>
-"""
-
     total = sum(a["tokens"] for a in record.get("agents", []) if isinstance(a.get("tokens"), int))
     total_in = sum(a["tokens_in"] for a in record.get("agents", []) if isinstance(a.get("tokens_in"), int))
     total_out = sum(a["tokens_out"] for a in record.get("agents", []) if isinstance(a.get("tokens_out"), int))
@@ -556,7 +511,7 @@ def render(record: dict) -> str:
     </div>
     <p class="note">Known token totals so far: in <b>{total_in:,}</b> · out <b>{total_out:,}</b> · total <b>{total:,}</b> (agents with numeric counts only; grok in/out splits are estimated).</p>
 {agents_note_html}  </section>
-{pie_section}{comp_section}{time_section}{summary_section}{model_summary_section}
+{pie_section}{comp_section}{summary_section}{model_summary_section}
   <section>
     <h2>Environment</h2>
     <table>

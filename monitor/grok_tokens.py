@@ -196,7 +196,7 @@ def _parse_ts(value: str) -> datetime | None:
 
 
 def _session_meta(session_dir: Path) -> dict:
-    meta = {"model": "?", "elapsed": "?", "elapsed_s": None, "title": "?",
+    meta = {"model": "?", "elapsed": "?", "title": "?",
             "parent_session_id": None, "is_subagent": False}
     summary_path = session_dir / "summary.json"
     if not summary_path.is_file():
@@ -216,7 +216,6 @@ def _session_meta(session_dir: Path) -> dict:
     end = _parse_ts(summary.get("updated_at", ""))
     if start and end:
         secs = int((end - start).total_seconds())
-        meta["elapsed_s"] = secs
         meta["elapsed"] = f"{secs // 60}m {secs % 60:02d}s"
     return meta
 
