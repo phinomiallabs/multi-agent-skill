@@ -97,7 +97,7 @@ All scripts are in `monitor/`. Each documents its arguments and exact token sema
 
 ### Reporting
 
-Report every subagent's tokens split into input and output. Claude splits are exact (from the harness/transcripts); grok splits are estimates, with only the total exact — label them as such.
+Report every subagent's tokens split into input and output. Claude splits are exact (from the harness/transcripts); grok splits are estimates, with only the total exact — label them as such. Model names for Claude rows come from each transcript's assistant `message.model` (friendly labels like Sonnet 5 / Fable 5); grok rows keep grok session metadata.
 
 ## Using non-Claude models
 
