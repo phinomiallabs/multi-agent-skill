@@ -53,6 +53,12 @@ Record schema (all string fields are plain text; they are HTML-escaped here):
   # Per-agent cache_read (Claude cache_read_input_tokens; grok 0 for the gauge,
   # cachedReadTokens for a ledger) is recorded by aggregate_tokens.py on each
   # agents/token_log entry, so the uncached views regenerate with no backfill.
+  #
+  # units (optional per agents/token_log row): "billed" (Claude) or
+  # "conversation" (grok — totalTokens is conversation size, NOT per-call
+  # billed input; not comparable to Claude columns). Old records without
+  # units fall back to model-name heuristics (name/model containing "grok"
+  # → conversation). Prefer update_run_record.py over hand-typing numbers.
 }
 """
 
@@ -63,6 +69,11 @@ import html
 import json
 import math
 from pathlib import Path
+
+GROK_UNITS_FOOTNOTE = (
+    "† grok ledger counts conversation size, not billed tokens; "
+    "not comparable to Claude columns"
+)
 
 CSS = """\
   :root{
@@ -158,6 +169,26 @@ def fmt_tokens(value: object) -> str:
     return esc(value if value is not None else "—")
 
 
+def row_units(row: dict) -> str:
+    """Return 'billed' or 'conversation' for an agents/token_log/summary row."""
+    units = row.get("units")
+    if units in ("billed", "conversation"):
+        return units
+    model = str(row.get("model") or row.get("models") or "").lower()
+    name = str(row.get("name") or row.get("agent") or row.get("group") or "").lower()
+    if "grok" in model or name.startswith("grok"):
+        return "conversation"
+    return "billed"
+
+
+def is_conversation_row(row: dict) -> bool:
+    return row_units(row) == "conversation"
+
+
+def has_conversation_agents(record: dict) -> bool:
+    return any(is_conversation_row(a) for a in record.get("agents", []))
+
+
 def fmt_compact(n: int) -> str:
     """Short token count for the small donut center/legend (1_234 -> '1.2k')."""
     if n < 1000:
@@ -167,22 +198,28 @@ def fmt_compact(n: int) -> str:
     return f"{n / 1_000_000:.2f}M".replace(".00M", "M")
 
 
-def pie_slices(rows: list[dict], label_key: str, value_key: str = "tokens") -> list[dict]:
+def pie_slices(rows: list[dict], label_key: str, value_key: str = "tokens",
+               *, billed_only: bool = False) -> list[dict]:
     """Extract drawable slices from a token_summary/model_summary list.
 
-    `value_key` selects the slice measure — "tokens" (total) or "tokens_out"
-    (generated, cache-neutral). Skips the appended "total (tracked)" row and
-    any zero/non-numeric value. Keeps record order (stable colour<->entity
-    mapping, so an entity is the same colour in the total and generated
-    donuts); if there are more than 8 groups, the smallest fold into a single
-    grey "other" slot so a 9th hue is never invented (a data-viz non-negotiable).
+    `value_key` selects the slice measure — "tokens" (total), "tokens_out"
+    (generated, cache-neutral), or "uncached". Skips the appended
+    "total (tracked)" row and any zero/non-numeric value. When
+    ``billed_only`` is True (uncached views), conversation-unit / grok rows
+    are omitted. Keeps record order (stable colour<->entity mapping); if
+    there are more than 8 groups, the smallest fold into a single grey
+    "other" slot so a 9th hue is never invented (a data-viz non-negotiable).
     """
-    items = [
-        {"label": str(r.get(label_key, "?")), "tokens": r[value_key]}
-        for r in rows
-        if isinstance(r.get(value_key), int) and r[value_key] > 0
-        and not str(r.get(label_key, "")).strip().lower().startswith("total")
-    ]
+    items = []
+    for r in rows:
+        if not isinstance(r.get(value_key), int) or r[value_key] <= 0:
+            continue
+        if str(r.get(label_key, "")).strip().lower().startswith("total"):
+            continue
+        if billed_only and is_conversation_row(r):
+            continue
+        # uncached null means n/a (conversation units) — already skipped by int check
+        items.append({"label": str(r.get(label_key, "?")), "tokens": r[value_key]})
     if len(items) > 8:
         keep = set(sorted(range(len(items)), key=lambda i: items[i]["tokens"],
                           reverse=True)[:7])
@@ -260,14 +297,21 @@ def pie_figure(items: list[dict], caption: str,
     )
 
 
-def comp_bars(rows: list[dict], label_key: str) -> str:
+def comp_bars(rows: list[dict], label_key: str, *, omit_conversation: bool = False) -> str:
     """Stacked composition bars: each summary row's total broken into input
     (processed once) + output + cache-read (re-reads, hatched). Bar length is
     total, on one shared scale, so the cache-read chunk is visible against the
-    solid 'uncached' part. Rows without cache data (grok) render all-solid."""
-    data = [r for r in rows
-            if isinstance(r.get("tokens"), int) and r["tokens"] > 0
-            and not str(r.get(label_key, "")).strip().lower().startswith("total")]
+    solid 'uncached' part. When omit_conversation is True (uncached section),
+    grok / conversation-unit rows are skipped entirely."""
+    data = []
+    for r in rows:
+        if not isinstance(r.get("tokens"), int) or r["tokens"] <= 0:
+            continue
+        if str(r.get(label_key, "")).strip().lower().startswith("total"):
+            continue
+        if omit_conversation and is_conversation_row(r):
+            continue
+        data.append(r)
     if not data:
         return ""
     maxtot = max(r["tokens"] for r in data) or 1
@@ -311,8 +355,16 @@ def render(record: dict) -> str:
         for p in record.get("phases", [])
     )
 
+    show_grok_dagger = has_conversation_agents(record)
+
+    def _agent_name_cell(a: dict) -> str:
+        name = esc(a["name"])
+        if show_grok_dagger and is_conversation_row(a):
+            return f"{name}†"
+        return name
+
     agent_rows = "\n".join(
-        f'        <tr><td>{esc(a["name"])}</td><td>{esc(a["model"])}</td>'
+        f'        <tr><td>{_agent_name_cell(a)}</td><td>{esc(a["model"])}</td>'
         f'<td>{esc(a["role"])}</td><td>{chip(a["status"], a["label"])}</td>'
         f'<td class="num">{fmt_tokens(a.get("tokens_in"))}</td>'
         f'<td class="num">{fmt_tokens(a.get("tokens_out"))}</td>'
@@ -328,19 +380,22 @@ def render(record: dict) -> str:
 
     def _opt(s: dict, key: str) -> str:
         value = s.get(key)
+        if value is None:
+            return "n/a" if key in ("uncached",) else "—"
         return f"{int(value):,}" if isinstance(value, int) else "—"
 
     def _share(s: dict, key: str) -> str:
         value = s.get(key)
-        return f"{value}%" if value is not None else "—"
+        return f"{value}%" if value is not None else "n/a"
 
     # Cache-neutral note shared by the two breakdown tables.
-    share_note = ('<p class="note">Share = % of all tracked tokens. '
-                  'Gen.&nbsp;share = % of output (generated) tokens. '
-                  'Uncached = total &minus; cache-read tokens (context re-read every '
-                  "call), i.e. tokens not served from cache. Claude's totals are "
-                  "dominated by cache-reads; grok exposes none on disk, so grok's "
-                  'uncached = its total.</p>')
+    share_note = (
+        '<p class="note">Share = % of all tracked tokens (mixed units). '
+        'Gen.&nbsp;share = % of output (generated) tokens. '
+        'Uncached = total &minus; cache-read for <b>billed</b> (Claude) rows only; '
+        'conversation-size (grok) rows show n/a and are excluded from Unc% — '
+        'not comparable to Claude columns.</p>'
+    )
 
     # Optional by-role breakdown written by summarize_tokens.py.
     summary_section = ""
@@ -402,23 +457,29 @@ def render(record: dict) -> str:
 
     # Donut charts by role and by model, on two measures: total tokens and —
     # the cache-neutral view — generated (output) tokens a.k.a. Gen. share.
-    # Both draw from the same summaries; an entity keeps its colour across the
-    # two rows because pie_slices preserves record order.
-    def _pies(value_key: str, center_label: str) -> list[str]:
+    # Uncached donuts are billed-only (Claude); grok conversation rows omitted.
+    def _pies(value_key: str, center_label: str, *, billed_only: bool = False) -> list[str]:
         figs = []
         if record.get("token_summary"):
-            items = pie_slices(record["token_summary"], "group", value_key)
+            items = pie_slices(record["token_summary"], "group", value_key,
+                               billed_only=billed_only)
             if items:
                 figs.append(pie_figure(items, "By role", center_label))
         if record.get("model_summary"):
-            items = pie_slices(record["model_summary"], "model", value_key)
+            items = pie_slices(record["model_summary"], "model", value_key,
+                               billed_only=billed_only)
             if items:
                 figs.append(pie_figure(items, "By model", center_label))
         return figs
 
     total_figs = _pies("tokens", "total tokens")
     gen_figs = _pies("tokens_out", "output tokens")
-    uncached_figs = _pies("uncached", "uncached tokens")
+    uncached_figs = _pies("uncached", "uncached tokens", billed_only=True)
+    grok_omit_note = (
+        f'<p class="note">{esc(GROK_UNITS_FOOTNOTE)}. '
+        "Uncached slices omit conversation-unit (grok) rows.</p>"
+        if show_grok_dagger else ""
+    )
     pie_section = ""
     if total_figs or gen_figs or uncached_figs:
         blocks = ""
@@ -427,7 +488,7 @@ def render(record: dict) -> str:
     <div class="pies">
 {chr(10).join(total_figs)}
     </div>
-    <p class="note">Slices are <b>total tokens</b>. Claude totals include cache-read tokens (context re-read every call) that inflate them next to grok — the cache-neutral view is below.</p>
+    <p class="note">Slices are <b>total tokens</b>. Claude totals are billed (per-call, incl. cache-reads); grok totals are conversation size — not the same unit. Cache-neutral views below.</p>
 """
         if gen_figs:
             blocks += f"""    <h3 class="pie-group">Generated tokens · cache-neutral (Gen.&nbsp;share)</h3>
@@ -437,36 +498,35 @@ def render(record: dict) -> str:
     <p class="note">Slices are <b>output (generated) tokens</b> — neither provider inflates output, so this is the fair share of work. Matches the <b>Gen.&nbsp;share</b> column below.</p>
 """
         if uncached_figs:
-            blocks += f"""    <h3 class="pie-group">Uncached tokens · total &minus; cache-reads</h3>
+            blocks += f"""    <h3 class="pie-group">Uncached tokens · total &minus; cache-reads (billed only)</h3>
     <div class="pies">
 {chr(10).join(uncached_figs)}
     </div>
-    <p class="note">Slices are <b>uncached tokens</b> (total &minus; cache-reads) — tokens processed once (not served from cache), crediting real input work that output-only drops. Matches the <b>Uncached</b> column below.</p>
-"""
+    <p class="note">Slices are <b>uncached billed tokens</b> (Claude total &minus; cache-reads). Grok conversation-size rows are omitted — not comparable.</p>
+{grok_omit_note}"""
         pie_section = f"""
   <section>
     <h2>Token distribution</h2>
 {blocks}  </section>
 """
 
-    # Composition bars decompose each total into input/output/cache-read, so
-    # the cache-read chunk that "uncached" removes is visible against the solid bar.
+    # Composition bars: uncached section omits conversation-unit rows.
     cblocks = ""
     if record.get("model_summary"):
-        bars = comp_bars(record["model_summary"], "model")
+        bars = comp_bars(record["model_summary"], "model", omit_conversation=True)
         if bars:
             cblocks += f'    <h3 class="pie-group">By model</h3>\n    <div class="comp">\n{bars}\n    </div>\n'
     if record.get("token_summary"):
-        bars = comp_bars(record["token_summary"], "group")
+        bars = comp_bars(record["token_summary"], "group", omit_conversation=True)
         if bars:
             cblocks += f'    <h3 class="pie-group">By role</h3>\n    <div class="comp">\n{bars}\n    </div>\n'
     comp_section = ""
     if cblocks:
         comp_section = f"""
   <section>
-    <h2>Token composition · uncached vs cache-reads</h2>
-    <p class="note">Bar length = total tokens (all bars share one scale). The hatched part is cache-read re-reads; the solid part is <b>uncached</b> (total &minus; cache-read). Grok exposes no cache-read on disk, so its bar is all solid.</p>
-{cblocks}  </section>
+    <h2>Token composition · uncached vs cache-reads (billed only)</h2>
+    <p class="note">Bar length = total billed tokens (all bars share one scale). The hatched part is cache-read re-reads; the solid part is <b>uncached</b> (total &minus; cache-read). Conversation-unit (grok) rows are omitted.</p>
+{grok_omit_note}{cblocks}  </section>
 """
 
     total = sum(a["tokens"] for a in record.get("agents", []) if isinstance(a.get("tokens"), int))
@@ -476,7 +536,15 @@ def render(record: dict) -> str:
     gate_note = record.get("gate_note", "")
     gate_html = f'    <p class="note">{esc(gate_note)}</p>\n' if gate_note else ""
     agents_note = record.get("agents_note", "")
-    agents_note_html = f'    <p class="note">{esc(agents_note)}</p>\n' if agents_note else ""
+    agents_note_parts = []
+    if show_grok_dagger:
+        agents_note_parts.append(GROK_UNITS_FOOTNOTE)
+    if agents_note:
+        agents_note_parts.append(agents_note)
+    agents_note_html = (
+        f'    <p class="note">{esc(" ".join(agents_note_parts))}</p>\n'
+        if agents_note_parts else ""
+    )
 
     # The artifact is static; the orchestrator republishes it on every
     # milestone. This meta tag makes the viewer's browser re-pull the page

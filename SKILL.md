@@ -77,19 +77,48 @@ Deliverables:
 
 When you run a non-Claude model, actively confirm the shell is progressing or has finished — you tend to miss when a background shell completes.
 
+### Run-record workflow (MANDATORY — never hand-type token numbers)
+
+Hand-transcribing numbers from `aggregate_tokens.py` table output into the run-record JSON is **forbidden**. It drops fields (especially `cache_read`) and corrupts uncached shares. Use the automated path:
+
+1. **Create** the run-record JSON at `runs/<date>-<slug>.json` with human fields only: `title`, `subtitle`, `phases`, `agents` (`name` / `model` / `role` / `status` / `label`), optional friendly `token_log` agent names, and a per-agent **`source`** key when known (`"advisor"`, `"direct:<agentId>"`, `"nested"`, `"grok:<sessionId>"`). Leave token numbers empty or zero — do **not** type them from a table.
+2. **Refresh numbers** at every phase transition and at run end via:
+
+```bash
+python monitor/update_run_record.py runs/<date>-<slug>.json \
+  --session-id <uuid> --project-slug <slug> \
+  [--repo-cwd <repo> ...] [--direct <agentId> ...]
+```
+
+Discovery args are saved into the record's `accounting` block, so later refreshes are just `python monitor/update_run_record.py runs/<date>-<slug>.json`.
+
+3. **Summarize + render**:
+
+```bash
+python monitor/summarize_tokens.py runs/<date>-<slug>.json
+python monitor/generate_monitor.py runs/<date>-<slug>.json -o runs/<date>-<slug>.html
+```
+
+### Units warning (Claude vs Grok)
+
+* Claude rows: `units: "billed"` — per-call billed input (full context re-counted every API call, incl. `cache_read`).
+* Grok rows: `units: "conversation"` — session `totalTokens` is **conversation size**, not per-call billed input. **Not comparable** to Claude columns. Rough billed-equivalent ≈ avg context size × n_calls (often ~10–20× larger).
+* Uncached % / uncached donuts use **billed rows only**; grok shows n/a / is omitted (with a † footnote on the agents table).
+
 ### Tooling
 
 All scripts are in `monitor/`. Each documents its arguments and exact token semantics in its own docstring — run `python monitor/<script>.py -h` and follow that rather than guessing.
 
 * One **run-record JSON** per run at `runs/<date>-<slug>.json` is the single source of truth *and* the reviewable token record. Schema: top of `generate_monitor.py`.
-* `aggregate_tokens.py --session-id <id> --project-slug <slug> [--repo-cwd <repo> ...] [--direct <agentId> ...]` — one-shot complete sweep of advisor + direct + nested Claude subagents + grok. Run at every phase transition and at run end; `--json` emits paste-ready `agents`/`token_log` fragments for the record.
+* **`update_run_record.py <run.json> [...]`** — **the only supported way to put token numbers into the record**. Runs the aggregate sweep, merges exact numbers (incl. `cache_read`, `units`) in place by `source` key, appends unmatched rows, prints a diff. Prefer this over calling aggregate for paste.
+* `aggregate_tokens.py --session-id <id> --project-slug <slug> [--repo-cwd <repo> ...] [--direct <agentId> ...]` — one-shot complete sweep (used by `update_run_record.py`). `--json` for machine-readable rows; do **not** hand-transcribe the table into the record.
 * `generate_monitor.py <run.json> -o <out.html>` — renders the monitor page from the record; publish/refresh the artifact from it.
-* `summarize_tokens.py <run.json>` — writes the by-role and by-model breakdowns (with percentages) back into the record. Run at the end of every run.
+* `summarize_tokens.py <run.json>` — writes the by-role and by-model breakdowns (with percentages) back into the record. Run after every `update_run_record`.
 * `claude_tokens.py` and `grok_tokens.py` are the per-source helpers `aggregate_tokens.py` already calls; use them directly only for spot checks.
 
 ### Finding the ids (no memory required)
 
-`aggregate_tokens.py` needs your `session-id` and `project-slug`; both are in your scratchpad path `/tmp/claude-1000/<project-slug>/<session-id>/scratchpad`:
+`update_run_record.py` / `aggregate_tokens.py` need your `session-id` and `project-slug`; both are in your scratchpad path `/tmp/claude-1000/<project-slug>/<session-id>/scratchpad`:
 * `project-slug` — the first segment, e.g. `-home-ubuntu-repos-multi-agent-skill`
 * `session-id` — the UUID directory under it
 
@@ -97,7 +126,7 @@ All scripts are in `monitor/`. Each documents its arguments and exact token sema
 
 ### Reporting
 
-Report every subagent's tokens split into input and output. Claude splits are exact (from the harness/transcripts); grok splits are estimates, with only the total exact — label them as such. Model names for Claude rows come from each transcript's assistant `message.model` (friendly labels like Sonnet 5 / Fable 5); grok rows keep grok session metadata.
+Report every subagent's tokens split into input and output. Claude splits are exact (from the harness/transcripts); grok splits are estimates of conversation-size units, with only the total exact in those units — label them as such and never mix with Claude billed totals in uncached math. Model names for Claude rows come from each transcript's assistant `message.model` (friendly labels like Sonnet 5 / Fable 5); grok rows keep grok session metadata.
 
 ## Using non-Claude models
 

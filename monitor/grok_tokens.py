@@ -1,15 +1,28 @@
 #!/usr/bin/env python3
-"""List grok-agent CLI sessions with their real token consumption.
+"""List grok-agent CLI sessions with their token accounting.
+
+IMPORTANT — units honesty
+-------------------------
+Grok's `totalTokens` (and the session totals this script reports) measure
+**conversation size** — how large the context window is at a given point —
+NOT per-call billed input the way Claude transcripts do (Claude re-counts the
+full context on every API call). These units are **not comparable** to Claude
+columns in the same table/donut. A rough billed-equivalent is
+`avg_context_size × n_calls`, which is often ~10–20× larger than the
+conversation-size total. Run-record / monitor rows should carry
+`units: "conversation"` for grok (vs `"billed"` for Claude).
 
 Each grok run writes ~/.grok/sessions/<url-escaped-cwd>/<session-uuid>/:
   - updates.jsonl : streaming updates. TWO different token signals live here:
-      * the ADDITIVE BILLING LEDGER — on `turn_completed` events a `usage`
-        object with exact `inputTokens` / `outputTokens` / `cachedReadTokens`
-        / `reasoningTokens`. Summed across turns it is the true session spend,
-        and it already FOLDS IN any subagents the session spawned. Preferred.
+      * the ADDITIVE SESSION LEDGER — on `turn_completed` events a `usage`
+        object with `inputTokens` / `outputTokens` / `cachedReadTokens`
+        / `reasoningTokens`. Summed across turns; already FOLDS IN any
+        subagents the session spawned. Preferred when present. Still
+        conversation-level accounting, not Claude-style per-call billing.
       * `params._meta.totalTokens` — a live CONTEXT-SIZE gauge, overwritten
         every turn (NOT a running total; it can even drop after a compaction).
-        Used only as a fallback when no ledger is present.
+        Used only as a fallback when no ledger is present. This is pure
+        conversation size (grows ~9k→59k over a typical worker run).
     Older grok / plain headless mode emits no ledger; then we fall back to the
     gauge and ESTIMATE the input/output split (output ~= assistant chars / 4).
   - chat_history.jsonl : the turns; assistant-generated text (for the estimate).

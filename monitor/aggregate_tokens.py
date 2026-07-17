@@ -14,8 +14,21 @@ Ground-truth locations
     /tmp/claude-1000/<project-slug>/<session-id>/tasks/a*.output
   Parentage is NOT recorded. Tag stems listed in --direct as direct; every
   other a*.output is rolled into one aggregated "nested" group.
-* Grok sessions (estimated in/out; exact total) for each --repo-cwd:
+* Grok sessions for each --repo-cwd (conversation-size units; see below):
     enumerated by grok_tokens.sessions_for_cwd
+
+Units honesty
+-------------
+Every row carries an explicit `units` field:
+  * ``"billed"``       — Claude (advisor / direct / nested). Per-call billed
+    input: the harness re-counts full context (incl. cache_read) every API
+    call. ``tokens_in`` = uncached + cache_read + cache_write.
+  * ``"conversation"`` — Grok. Session totalTokens tracks **conversation
+    size** (context-window growth over the run), NOT per-call billed input.
+    Not comparable to Claude columns. Rough billed-equivalent ≈
+    avg context size × n_calls (often ~10–20× the conversation total).
+Never mix the two in uncached-share / donut math without filtering on
+``units`` (see summarize_tokens.py / generate_monitor.py).
 
 Model labels
 ------------
@@ -31,6 +44,9 @@ ids still render; only the model string content changes for new sweeps.
 Usage:
     python aggregate_tokens.py --session-id <id> --project-slug <slug> \\
         [--repo-cwd <path> ...] [--direct <agentId> ...] [--json]
+
+Prefer ``update_run_record.py <run.json>`` to merge these numbers into a run
+record — never hand-type token figures from the table output.
 """
 
 from __future__ import annotations
@@ -74,7 +90,8 @@ def claude_row(name: str, kind: str, counts: dict, **extra) -> dict:
     """Map claude_tokens.transcript_usage counts to a reporting row.
 
     tokens_in uses input_all (uncached + cache_read + cache_write), matching
-    the harness total and existing run-record convention.
+    the harness total and existing run-record convention. units is always
+    "billed" (per-call full-context accounting).
 
     model is the friendly transcript label when known; omitted when the
     transcript had no message.model (callers fall back to generic labels).
@@ -86,6 +103,7 @@ def claude_row(name: str, kind: str, counts: dict, **extra) -> dict:
         "tokens_out": counts["out"],
         "tokens": counts["total"],
         "exact": True,
+        "units": "billed",
         "calls": counts["calls"],
         "in_uncached": counts["in"],
         "cache_r": counts["cache_r"],
@@ -129,6 +147,7 @@ def collect(
             "tokens_out": 0,
             "tokens": 0,
             "exact": True,
+            "units": "billed",
             "missing": True,
             "path": str(adv),
             "session_id": session_id,
@@ -181,7 +200,10 @@ def collect(
                 "tokens_out": info["tokens_out"] or 0,
                 "tokens": info["tokens"] or 0,
                 # exact when read from the additive ledger; gauge/estimate else.
+                # units=conversation: totalTokens is conversation size, NOT
+                # per-call billed input (not comparable to Claude billed rows).
                 "exact": info.get("exact", False),
+                "units": "conversation",
                 "basis": info.get("basis"),
                 "cached": info.get("cached"),
                 "model": info["model"],
@@ -235,6 +257,8 @@ def _as_agents(rows: list[dict]) -> list[dict]:
             # grok ledger, 0 for the grok gauge (no re-reads counted on disk).
             "cache_read": int((r.get("cached") if r["kind"] == "grok" else r.get("cache_r")) or 0),
             "source": r["kind"],
+            # billed = Claude per-call; conversation = grok context size.
+            "units": r.get("units") or ("conversation" if r["kind"] == "grok" else "billed"),
             "exact": r.get("exact", True),
         }
         if r["kind"] == "grok":
@@ -269,6 +293,7 @@ def _as_token_log(rows: list[dict]) -> list[dict]:
             "tokens_in": r["tokens_in"],
             "tokens_out": r["tokens_out"],
             "cache_read": int((r.get("cached") if r["kind"] == "grok" else r.get("cache_r")) or 0),
+            "units": r.get("units") or ("conversation" if r["kind"] == "grok" else "billed"),
             "exact": r.get("exact", True),
         }
         if r["kind"] == "grok":
