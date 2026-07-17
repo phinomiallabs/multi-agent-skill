@@ -16,17 +16,21 @@ descending.
 
 Units honesty (uncached views)
 ------------------------------
-`uncached` / `uncached_pct` only include rows with ``units == "billed"``
-(Claude per-call accounting). Fallback for legacy rows without ``units``:
-a real ``cache_read`` > 0 counts as billed; model/name containing "grok"
-counts as conversation. Conversation-unit (grok) groups show uncached as
-null / "n/a" and are excluded from the uncached share denominator — they
-must not appear as 100% uncached. The total row is footnoted accordingly.
+`uncached` / `uncached_pct` cover **all** tracked rows:
 
-Percentages (`pct`, `out_pct`) still cover all tracked rows (mixed units);
-only the uncached share is billed-only. Estimate notes for in/out splits
-live at the agent level; a one-line note is only attached to model_summary
-if token_summary already carries one.
+* **billed** (Claude): uncached = tokens − cache_read (exact).
+* **conversation** (grok): uncached is **estimated** as the conversation
+  total (``tokens``). Each unique token is processed uncached at least once;
+  assumes prefix caching on re-read context, so actual billed uncached ≥ this
+  lower bound. Rows/groups with any conversation portion set
+  ``uncached_estimated: true``.
+
+Fallback for legacy rows without ``units``: a real ``cache_read`` > 0 counts
+as billed; model/name containing "grok" counts as conversation.
+
+Percentages (`pct`, `out_pct`) still cover all tracked rows (mixed units).
+Estimate notes for in/out splits live at the agent level; a one-line note is
+only attached to model_summary if token_summary already carries one.
 
 Usage:
     python summarize_tokens.py <run.json>            # write back + print tables
@@ -41,8 +45,9 @@ from collections import OrderedDict
 from pathlib import Path
 
 UNCACHED_NOTE = (
-    "Unc% is billed-only (Claude). Grok conversation-size rows are n/a and "
-    "excluded from the uncached share — not comparable to Claude columns."
+    "Uncached for grok is estimated (= unique conversation tokens; assumes "
+    "prefix caching — actual billed uncached >= this); Claude uncached is "
+    "exact (total - cache_read)."
 )
 
 
@@ -66,6 +71,19 @@ def is_billed(entry: dict) -> bool:
     return row_units(entry) == "billed"
 
 
+def _group_uncached(g: dict) -> tuple[int, bool]:
+    """Return (uncached, uncached_estimated) for an aggregate group/model.
+
+    Billed portion: tokens − cache_read (exact). Conversation portion:
+    conversation total as a lower-bound estimate of uncached.
+    """
+    billed_unc = 0
+    if g["has_billed"]:
+        billed_unc = g["billed_tokens"] - g["billed_cache"]
+    conv_unc = g["conversation_tokens"] if g["has_conversation"] else 0
+    return billed_unc + conv_unc, g["has_conversation"]
+
+
 def summarize(record: dict) -> list[dict]:
     groups: "OrderedDict[str, dict]" = OrderedDict()
     for entry in record.get("token_log", []):
@@ -73,7 +91,8 @@ def summarize(record: dict) -> list[dict]:
         g = groups.setdefault(key, {"group": key, "models": set(), "agents": 0,
                                     "tokens": 0, "tokens_in": 0, "tokens_out": 0,
                                     "cache_read": 0, "billed_tokens": 0,
-                                    "billed_cache": 0, "has_billed": False,
+                                    "billed_cache": 0, "conversation_tokens": 0,
+                                    "has_billed": False,
                                     "has_conversation": False})
         g["models"].add(entry.get("model", "?"))
         g["agents"] += 1
@@ -87,31 +106,22 @@ def summarize(record: dict) -> list[dict]:
             g["billed_cache"] += int(entry.get("cache_read") or 0)
         else:
             g["has_conversation"] = True
+            g["conversation_tokens"] += int(entry.get("tokens", 0))
 
     total = sum(g["tokens"] for g in groups.values()) or 1
     # out_pct is the cache-neutral view: share of OUTPUT (generated) tokens,
     # which neither provider inflates — unlike `pct` (share of total tokens),
     # where Claude's cache-read tokens dominate the denominator.
     total_out = sum(g["tokens_out"] for g in groups.values()) or 1
-    # Uncached share: billed rows only.
-    total_uncached = sum(
-        g["billed_tokens"] - g["billed_cache"] for g in groups.values()
-        if g["has_billed"]
-    ) or 1
+    # Uncached share: billed exact + conversation estimated.
+    total_uncached = sum(_group_uncached(g)[0] for g in groups.values()) or 1
     rows = []
+    any_estimated = False
     for g in groups.values():
-        if g["has_billed"] and not g["has_conversation"]:
-            uncached: int | None = g["billed_tokens"] - g["billed_cache"]
-            uncached_pct: float | None = round(100.0 * uncached / total_uncached, 1)
-        elif g["has_billed"] and g["has_conversation"]:
-            # Mixed group: report billed uncached only.
-            uncached = g["billed_tokens"] - g["billed_cache"]
-            uncached_pct = round(100.0 * uncached / total_uncached, 1)
-        else:
-            # Pure conversation (grok) group — n/a in uncached views.
-            uncached = None
-            uncached_pct = None
-        rows.append({
+        uncached, estimated = _group_uncached(g)
+        if estimated:
+            any_estimated = True
+        row = {
             "group": g["group"],
             "models": ", ".join(sorted(g["models"])),
             "agents": g["agents"],
@@ -122,12 +132,13 @@ def summarize(record: dict) -> list[dict]:
             "uncached": uncached,
             "pct": round(100.0 * g["tokens"] / total, 1),
             "out_pct": round(100.0 * g["tokens_out"] / total_out, 1),
-            "uncached_pct": uncached_pct,
-        })
+            "uncached_pct": round(100.0 * uncached / total_uncached, 1),
+        }
+        if estimated:
+            row["uncached_estimated"] = True
+        rows.append(row)
     tot_cache = sum(g["cache_read"] for g in groups.values())
-    tot_billed = sum(g["billed_tokens"] for g in groups.values())
-    tot_billed_cache = sum(g["billed_cache"] for g in groups.values())
-    tot_uncached = tot_billed - tot_billed_cache
+    tot_uncached = sum(_group_uncached(g)[0] for g in groups.values())
     total_row = {
         "group": "total (tracked)",
         "models": "",
@@ -142,6 +153,8 @@ def summarize(record: dict) -> list[dict]:
         "uncached_pct": 100.0,
         "note": UNCACHED_NOTE,
     }
+    if any_estimated:
+        total_row["uncached_estimated"] = True
     rows.append(total_row)
     return rows
 
@@ -154,7 +167,8 @@ def summarize_by_model(record: dict) -> list[dict]:
         m = models.setdefault(key, {"model": key, "agents": set(),
                                     "tokens": 0, "tokens_in": 0, "tokens_out": 0,
                                     "cache_read": 0, "billed_tokens": 0,
-                                    "billed_cache": 0, "has_billed": False,
+                                    "billed_cache": 0, "conversation_tokens": 0,
+                                    "has_billed": False,
                                     "has_conversation": False})
         m["agents"].add(entry.get("agent", "?"))
         m["tokens"] += int(entry.get("tokens", 0))
@@ -167,22 +181,18 @@ def summarize_by_model(record: dict) -> list[dict]:
             m["billed_cache"] += int(entry.get("cache_read") or 0)
         else:
             m["has_conversation"] = True
+            m["conversation_tokens"] += int(entry.get("tokens", 0))
 
     total = sum(m["tokens"] for m in models.values()) or 1
     total_out = sum(m["tokens_out"] for m in models.values()) or 1  # cache-neutral base
-    total_uncached = sum(
-        m["billed_tokens"] - m["billed_cache"] for m in models.values()
-        if m["has_billed"]
-    ) or 1
+    total_uncached = sum(_group_uncached(m)[0] for m in models.values()) or 1
     rows = []
+    any_estimated = False
     for m in models.values():
-        if m["has_billed"]:
-            uncached: int | None = m["billed_tokens"] - m["billed_cache"]
-            uncached_pct: float | None = round(100.0 * uncached / total_uncached, 1)
-        else:
-            uncached = None
-            uncached_pct = None
-        rows.append({
+        uncached, estimated = _group_uncached(m)
+        if estimated:
+            any_estimated = True
+        row = {
             "model": m["model"],
             "agents": len(m["agents"]),
             "tokens_in": m["tokens_in"],
@@ -192,29 +202,34 @@ def summarize_by_model(record: dict) -> list[dict]:
             "uncached": uncached,
             "pct": round(100.0 * m["tokens"] / total, 1),
             "out_pct": round(100.0 * m["tokens_out"] / total_out, 1),
-            "uncached_pct": uncached_pct,
-        })
+            "uncached_pct": round(100.0 * uncached / total_uncached, 1),
+        }
+        if estimated:
+            row["uncached_estimated"] = True
+        rows.append(row)
     rows.sort(key=lambda r: r["tokens"], reverse=True)
 
     all_agents: set[str] = set()
     for m in models.values():
         all_agents |= m["agents"]
     tot_cache = sum(m["cache_read"] for m in models.values())
-    tot_billed = sum(m["billed_tokens"] for m in models.values())
-    tot_billed_cache = sum(m["billed_cache"] for m in models.values())
-    rows.append({
+    tot_uncached = sum(_group_uncached(m)[0] for m in models.values())
+    total_row = {
         "model": "total (tracked)",
         "agents": len(all_agents),
         "tokens_in": sum(m["tokens_in"] for m in models.values()),
         "tokens_out": sum(m["tokens_out"] for m in models.values()),
         "tokens": total,
         "cache_read": tot_cache,
-        "uncached": tot_billed - tot_billed_cache,
+        "uncached": tot_uncached,
         "pct": 100.0,
         "out_pct": 100.0,
         "uncached_pct": 100.0,
         "note": UNCACHED_NOTE,
-    })
+    }
+    if any_estimated:
+        total_row["uncached_estimated"] = True
+    rows.append(total_row)
     return rows
 
 
@@ -236,7 +251,7 @@ def _summary_note(token_summary: list | dict | None) -> str | None:
 
 
 def _fmt_unc_pct(value: object) -> str:
-    """Format uncached_pct; None means conversation-units / n/a."""
+    """Format uncached_pct; None is legacy n/a (should not appear after re-summarize)."""
     if value is None:
         return "n/a"
     return f"{value}%"

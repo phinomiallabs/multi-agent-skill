@@ -102,8 +102,8 @@ python monitor/generate_monitor.py runs/<date>-<slug>.json -o runs/<date>-<slug>
 ### Units warning (Claude vs Grok)
 
 * Claude rows: `units: "billed"` — per-call billed input (full context re-counted every API call, incl. `cache_read`).
-* Grok rows: `units: "conversation"` — session `totalTokens` is **conversation size**, not per-call billed input. **Not comparable** to Claude columns. Rough billed-equivalent ≈ avg context size × n_calls (often ~10–20× larger).
-* Uncached % / uncached donuts use **billed rows only**; grok shows n/a / is omitted (with a † footnote on the agents table).
+* Grok rows: `units: "conversation"` — session `totalTokens` is **conversation size**, not per-call billed input. **Not comparable** to Claude total columns. Rough billed-equivalent ≈ avg context size × n_calls (often ~10–20× larger). Agents table keeps a † footnote on conversation-unit rows for that reason.
+* **Uncached**: Claude is exact (`tokens − cache_read`). Grok has no per-call billed usage in session logs, so uncached is **estimated** as the conversation total (each unique token processed uncached once; assumes prefix caching on re-read context — actual billed uncached ≥ this lower bound). Estimated rows set `uncached_estimated: true` and appear in Unc% / uncached donuts/bars with legend values marked `~…(est.)`.
 
 ### Tooling
 
@@ -126,7 +126,7 @@ All scripts are in `monitor/`. Each documents its arguments and exact token sema
 
 ### Reporting
 
-Report every subagent's tokens split into input and output. Claude splits are exact (from the harness/transcripts); grok splits are estimates of conversation-size units, with only the total exact in those units — label them as such and never mix with Claude billed totals in uncached math. Model names for Claude rows come from each transcript's assistant `message.model` (friendly labels like Sonnet 5 / Fable 5); grok rows keep grok session metadata.
+Report every subagent's tokens split into input and output. Claude splits are exact (from the harness/transcripts); grok splits are estimates of conversation-size units, with only the total exact in those units — label them as such. Totals remain not billed-comparable across providers; uncached views include grok as an estimate (see Units warning). Model names for Claude rows come from each transcript's assistant `message.model` (friendly labels like Sonnet 5 / Fable 5); grok rows keep grok session metadata.
 
 ## Using non-Claude models
 
