@@ -132,7 +132,9 @@ Report every subagent's tokens split into input and output. Claude splits are ex
 
 **Grok** — use `grok-agent` as an implementation worker. The prompt template lives in `templates/grok-worker.sh`: fill in every `[FILL IN]`, then run it from the target repo. It invokes `grok-agent --yolo -p "<prompt>"`.
 
-After every Grok invocation, inspect the actual repository changes (Grok's own report can overstate what changed):
+**Cursor** — use `agent` as an implementation worker. The template lives in `templates/cursor-worker.sh`; it invokes `agent --model "<model>" --force "<prompt>"`. Default model is `grok-4.5`. For a `cursor-<model>` request (e.g. `cursor-grok-4.5`), pass the part after `cursor-` as the model: `MODEL=grok-4.5 templates/cursor-worker.sh`.
+
+After every Grok or Cursor invocation, inspect the actual repository changes (the model's own report can overstate what changed):
 
 ```bash
 git status --short
