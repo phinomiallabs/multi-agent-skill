@@ -6,17 +6,16 @@ description: Delegates implementation work from specifications and plans to non-
 # Multi-agent-skill
 
 The user should provide you with
-* Spec
-* Plans/tickets/issues
+* Work item(s) — spec, plan, tickets, or issues (often a single git issue containing all of them)
 * Implementer model
 * Investigator model
-* (Optional) intructions: markdowns, htmls, etc.
+* (Optional) instructions: markdowns, htmls, etc.
 
 You are the advisor. Your job is to orchestrate and verify.
 
 ## Workflow
 
-1. The advisor reads the spec, plan and (optional) instructions. After that,
+1. The advisor reads the work item and (optional) instructions, then extracts two distinct things from it: the **spec** (the fixed "what must be true" — the oracle the verifier checks against) and the **plan** (the mutable "what to do" — refined by investigation). If the work item states work but no explicit spec, **derive the spec first** — otherwise there is nothing to verify against. After that,
     * Divide the work into investigation, implementation, and verification
     * Assign investigation work (e.g. scoping, reading the codebase) to the investigator subagents and implementation work (e.g. coding) to the implementer subagents. 
 2. The advisor launches investigator subagents to finish investigation.
@@ -36,7 +35,7 @@ You are the advisor. Your job is to orchestrate and verify.
 * The advisor should outsource writing code and reading files to implementers and investigators. The advisor is responsible for ideation only.
 
 ### Rules
-* Coding and writing verification tests are encouraged to be done in parallel. It's better to write verification test without seeing the implemented code. The advisor should know the objectives of the plan and hen can write tests without the implementation.
+* Coding and writing verification tests are encouraged to be done in parallel. It's better to write verification test without seeing the implemented code. The advisor should know the objectives of the spec and then can write tests without the implementation.
 * Implementer subagents should use skills /implement and /tdd when available.
 * When making technical decisions, do not give much weight to development cost. Instead, prefer quality, simplicity, robustness, scalability, and long term maintainability.
 * Use subagents and dynamic workflows. 

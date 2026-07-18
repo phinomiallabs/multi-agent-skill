@@ -12,11 +12,10 @@ Run
 ```
 /multi-agent-skill
 
-* Spec
-* Plans/tickets/issues
+* Work item(s) — spec, plan, tickets, or issues (often a single git issue containing all of them)
 * Implementer model
 * Investigator model
-* (Optional) intructions: markdowns, htmls, etc.
+* (Optional) instructions: markdowns, htmls, etc.
 
 ```
 
