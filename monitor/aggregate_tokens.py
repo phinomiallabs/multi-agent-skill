@@ -16,17 +16,22 @@ Ground-truth locations
   other a*.output is rolled into one aggregated "nested" group.
 * Grok sessions for each --repo-cwd (conversation-size units; see below):
     enumerated by grok_tokens.sessions_for_cwd
+* Cursor CLI (`agent`) runs for each --repo-cwd (exact billed units):
+    ~/.cursor-agent-usage/<url-escaped-cwd>/<session-id>.json, captured at run
+    time by templates/cursor-worker.sh (cursor persists no usage on disk).
 
 Units honesty
 -------------
 Every row carries an explicit `units` field:
-  * ``"billed"``       — Claude (advisor / direct / nested). Per-call billed
-    input: the harness re-counts full context (incl. cache_read) every API
-    call. ``tokens_in`` = uncached + cache_read + cache_write.
-  * ``"conversation"`` — Grok. Session totalTokens tracks **conversation
-    size** (context-window growth over the run), NOT per-call billed input.
-    Not comparable to Claude columns. Rough billed-equivalent ≈
-    avg context size × n_calls (often ~10–20× the conversation total).
+  * ``"billed"``       — Claude (advisor / direct / nested) AND Cursor. Per-call
+    billed input: full context (incl. cache_read) counted every API call.
+    ``tokens_in`` = uncached + cache_read + cache_write. Cursor's model string
+    is "grok-4.5", which contains "grok", so cursor rows set units="billed"
+    EXPLICITLY — never rely on the model-name heuristic for them.
+  * ``"conversation"`` — Grok (native grok-agent). Session totalTokens tracks
+    **conversation size** (context-window growth over the run), NOT per-call
+    billed input. Not comparable to Claude/cursor columns. Rough
+    billed-equivalent ≈ avg context size × n_calls (often ~10–20× the total).
 Never mix the two in uncached-share / donut math without filtering on
 ``units`` (see summarize_tokens.py / generate_monitor.py).
 
@@ -60,6 +65,7 @@ from pathlib import Path
 # Same-directory imports (this package is invoked as scripts, not installed).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from claude_tokens import friendly_model_name, transcript_usage  # noqa: E402
+from cursor_tokens import cursor_sessions_for_cwd  # noqa: E402
 from grok_tokens import grok_sessions_for_cwd  # noqa: E402
 
 ADVISOR_ROOT = Path.home() / ".claude" / "projects"
@@ -213,6 +219,33 @@ def collect(
                 "path": info.get("path"),
             })
 
+    # (d) Cursor CLI (`agent`) sessions per repo cwd. Exact & billed like Claude
+    # (usage captured at run time into ~/.cursor-agent-usage; see cursor_tokens).
+    # units="billed" is set explicitly: the model string (e.g. "grok-4.5")
+    # contains "grok", so heuristic fallbacks would otherwise misread it as
+    # grok's conversation units.
+    for cwd in repo_cwds:
+        resolved = cwd.resolve()
+        for info in cursor_sessions_for_cwd(resolved):
+            rows.append({
+                "kind": "cursor",
+                "name": info["id"],
+                "tokens_in": info["tokens_in"],
+                "tokens_out": info["tokens_out"],
+                "tokens": info["tokens"],
+                "exact": True,
+                "units": "billed",
+                "cache_r": info["cache_r"],
+                "cache_w": info["cache_w"],
+                "in_uncached": info["in_uncached"],
+                "model": info["model_label"],
+                "elapsed": info["elapsed"],
+                "title": info["title"],
+                "cwd": str(resolved),
+                "path": info["path"],
+                "session_id": info["id"],
+            })
+
     totals = {
         "tokens_in": sum(r["tokens_in"] or 0 for r in rows),
         "tokens_out": sum(r["tokens_out"] or 0 for r in rows),
@@ -241,11 +274,13 @@ def _as_agents(rows: list[dict]) -> list[dict]:
             "direct": r["name"],
             "nested": f"nested-agents ×{r.get('transcripts', 0)}",
             "grok": f"grok:{r['name'][:8]}",
+            "cursor": f"cursor:{r['name'][:8]}",
         }.get(r["kind"], r["name"])
         if r["kind"] == "grok":
             model = r.get("model", "grok")
         else:
             # Transcript-derived friendly name, else legacy generic source tag.
+            # Cursor rows already carry a "<model> (cursor)" label.
             model = r.get("model") or _GENERIC_MODEL.get(r["kind"], "?")
         entry = {
             "name": name,
@@ -261,7 +296,7 @@ def _as_agents(rows: list[dict]) -> list[dict]:
             "units": r.get("units") or ("conversation" if r["kind"] == "grok" else "billed"),
             "exact": r.get("exact", True),
         }
-        if r["kind"] == "grok":
+        if r["kind"] in ("grok", "cursor"):
             entry["elapsed"] = r.get("elapsed", "?")
             entry["title"] = r.get("title", "?")
             entry["session_id"] = r["name"]
@@ -296,7 +331,7 @@ def _as_token_log(rows: list[dict]) -> list[dict]:
             "units": r.get("units") or ("conversation" if r["kind"] == "grok" else "billed"),
             "exact": r.get("exact", True),
         }
-        if r["kind"] == "grok":
+        if r["kind"] in ("grok", "cursor"):
             entry["task"] = r.get("title", "")
             entry["session_id"] = r["name"]
         log.append(entry)
@@ -326,6 +361,10 @@ def print_table(result: dict) -> None:
             notes = f"est. split · {r.get('model', '?')} · {r.get('elapsed', '?')}"
             if r.get("title") and r["title"] != "?":
                 notes += f" · {r['title'][:40]}"
+        elif r["kind"] == "cursor":
+            notes = f"{r.get('model', '?')} · exact billed · {r.get('elapsed', '?')}"
+            if r.get("title") and r["title"] != "?":
+                notes += f" · {r['title'][:40]}"
         print(fmt.format(
             r["kind"],
             r["name"][:42],
@@ -338,7 +377,7 @@ def print_table(result: dict) -> None:
     print(fmt.format("-" * 10, "-" * 42, "-" * 12, "-" * 12, "-" * 12, "-" * 20))
     print(fmt.format(
         "TOTAL", "", f"{t['tokens_in']:,}", f"{t['tokens_out']:,}", f"{t['tokens']:,}",
-        "advisor + direct + nested + grok",
+        "advisor + direct + nested + grok + cursor",
     ))
 
 

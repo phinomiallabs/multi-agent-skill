@@ -5,7 +5,8 @@ Workflow (MANDATORY — never hand-type token numbers)
 ----------------------------------------------------
 1. Create the run-record JSON with human fields only: title, phases, agents
    with name/model/role/status/label, and an optional per-agent ``source`` key
-   (``"advisor"``, ``"direct:<agentId>"``, ``"nested"``, ``"grok:<sessionId>"``).
+   (``"advisor"``, ``"direct:<agentId>"``, ``"nested"``, ``"grok:<sessionId>"``,
+   ``"cursor:<sessionId>"``).
    Do **not** fill tokens_in / tokens_out / tokens / cache_read by hand.
 2. At every phase transition and at run end, refresh numbers::
 
@@ -40,9 +41,10 @@ What this does
 * Prints a diff-style summary of every change.
 * Writes the updated JSON back (indent=2).
 
-Units: Claude rows get ``units: "billed"``; grok rows get
-``units: "conversation"`` (conversation size, not per-call billed input —
-not comparable to Claude columns). See aggregate_tokens / grok_tokens docs.
+Units: Claude and Cursor rows get ``units: "billed"`` (per-call billed input,
+comparable to each other); grok rows get ``units: "conversation"`` (conversation
+size, not per-call billed input — not comparable to billed columns). See
+aggregate_tokens / grok_tokens / cursor_tokens docs.
 
 Usage:
     python update_run_record.py <run.json> \\
@@ -97,6 +99,13 @@ def source_key_from_agg(agg: dict, *, for_token_log: bool = False) -> str:
             if len(agent) > 20 and "-" in agent:
                 sid = agent
         return f"grok:{sid}" if sid else "grok:?"
+    if kind == "cursor":
+        sid = agg.get("session_id") or ""
+        if not sid and for_token_log:
+            agent = agg.get("agent") or ""
+            if len(agent) > 20 and "-" in agent:
+                sid = agent
+        return f"cursor:{sid}" if sid else "cursor:?"
     return kind or "?"
 
 
@@ -117,6 +126,11 @@ def infer_source_key(row: dict, *, is_token_log: bool = False) -> str | None:
             if sid:
                 return f"grok:{sid}"
             return None
+        if explicit == "cursor":
+            sid = row.get("session_id")
+            if sid:
+                return f"cursor:{sid}"
+            return None
         return str(explicit)
 
     name = str(row.get("agent" if is_token_log else "name") or "").lower()
@@ -127,6 +141,10 @@ def infer_source_key(row: dict, *, is_token_log: bool = False) -> str | None:
         return "nested"
     if row.get("agent_id"):
         return f"direct:{row['agent_id']}"
+    # Cursor before grok: cursor's model label ("grok-4.5 (cursor)") contains
+    # "grok", so match the more specific "cursor" marker first.
+    if row.get("session_id") and ("cursor" in name or "cursor" in model):
+        return f"cursor:{row['session_id']}"
     if row.get("session_id") and ("grok" in name or "grok" in model):
         return f"grok:{row['session_id']}"
     # Bare agentId-looking name (Claude direct transcript stem).
