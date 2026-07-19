@@ -79,6 +79,13 @@ GROK_UNITS_FOOTNOTE = (
     "not comparable to Claude columns"
 )
 
+# Shown only when a run carries a fallback (conversation-unit) row, so a
+# fully-billed run reads clean. Contains the literal word "estimated".
+ESTIMATED_INDICATOR = (
+    "Estimated figures present — this run includes fallback (conversation-unit) "
+    "rows whose uncached/output are estimated, not billed (marked † and ~(est.))."
+)
+
 CSS = """\
   :root{
     --bg:#f7f8f6; --panel:#ffffff; --ink:#1d2321; --muted:#5d6a64; --line:#dde3df;
@@ -326,12 +333,14 @@ def pie_figure(items: list[dict], caption: str,
     )
 
 
-def comp_bars(rows: list[dict], label_key: str) -> str:
-    """Stacked composition bars: each summary row's total broken into input
-    (processed once) + output + cache-read (re-reads, hatched). Bar length is
-    total, on one shared scale, so the cache-read chunk is visible against the
-    solid 'uncached' part. Conversation-unit (grok) rows appear as normal
-    bars; their uncached value is marked ~…(est.)."""
+def comp_bars(rows: list[dict], label_key: str, show_estimated: bool = False) -> str:
+    """Stacked composition bars — the primary token view. Each summary row's
+    billed total is broken into uncached (input processed once) + output (both
+    solid) + cache-read (re-reads, hatched). Bar length is total, on one shared
+    scale, so magnitude and composition read at a glance and a billed provider's
+    cache-read chunk is visible. Fallback (conversation-unit) rows appear as
+    normal bars; their uncached value is marked ~…(est.) and the estimate note
+    is shown only when `show_estimated` is set."""
     data = []
     for r in rows:
         if not isinstance(r.get("tokens"), int) or r["tokens"] <= 0:
@@ -347,13 +356,10 @@ def comp_bars(rows: list[dict], label_key: str) -> str:
         tot = r["tokens"]
         cr = int(r.get("cache_read") or 0)
         out = int(r.get("tokens_out") or 0)
-        new_in = max(tot - cr - out, 0)
+        uncached = max(tot - cr - out, 0)  # billed: tokens_in - cache_read
         estimated = row_uncached_estimated(r)
-        # Prefer summary uncached when present (includes grok estimate = tokens).
-        if isinstance(r.get("uncached"), int):
-            unc = r["uncached"]
-        else:
-            unc = tot - cr
+        # Label uses the SAME value as the uncached segment (tokens_in - cache_read)
+        # so bar segment == bar label == table Uncached for every row.
 
         def seg(width: int, style: str, cls: str, label: str) -> str:
             if width <= 0:
@@ -361,10 +367,10 @@ def comp_bars(rows: list[dict], label_key: str) -> str:
             return (f'<span class="comp-seg {cls}" style="width:{100.0 * width / tot:.3f}%;'
                     f'{style}" title="{esc(label)}: {width:,}"></span>')
 
-        segs = (seg(new_in, "background:var(--s1)", "", "input (processed once)")
+        segs = (seg(uncached, "background:var(--s1)", "", "uncached (processed once)")
                 + seg(out, "background:var(--s2)", "", "output")
                 + seg(cr, "", "seg-cache", "cache-read (re-reads)"))
-        unc_txt = f"~{fmt_compact(unc)} (est.)" if estimated else fmt_compact(unc)
+        unc_txt = f"~{fmt_compact(uncached)} (est.)" if estimated else fmt_compact(uncached)
         rows_html.append(
             f'      <div class="comp-row"><span class="comp-lab">{esc(r[label_key])}</span>'
             f'<span class="comp-track"><span class="comp-bar" style="width:{100.0 * tot / maxtot:.2f}%">'
@@ -372,15 +378,17 @@ def comp_bars(rows: list[dict], label_key: str) -> str:
             f'<span class="comp-val">{esc(fmt_compact(tot))} · uncached '
             f'{esc(unc_txt)}</span></div>'
         )
-    legend_html = (
-        '      <div class="comp-legend">'
-        '<span><i style="background:var(--s1)"></i>input (once)</span>'
-        '<span><i style="background:var(--s2)"></i>output</span>'
-        '<span><i class="seg-cache"></i>cache-read (re-reads)</span>'
-        '<span>solid = uncached (Claude: total &minus; cache-read; '
-        'grok: ~conversation total (est.))</span>'
-        '</div>'
-    )
+    legend_parts = [
+        '<span><i style="background:var(--s1)"></i>uncached</span>',
+        '<span><i style="background:var(--s2)"></i>output</span>',
+        '<span><i class="seg-cache"></i>cache-read (re-reads)</span>',
+    ]
+    if show_estimated:
+        legend_parts.append(
+            '<span>solid = uncached + output; ~…(est.) marks fallback '
+            '(conversation-unit) rows whose uncached is estimated</span>'
+        )
+    legend_html = '      <div class="comp-legend">' + "".join(legend_parts) + "</div>"
     return "\n".join(rows_html) + "\n" + legend_html
 
 
@@ -392,6 +400,13 @@ def render(record: dict) -> str:
     )
 
     show_grok_dagger = has_conversation_agents(record)
+    # Any fallback/estimated row anywhere (agents or the summary tables) turns
+    # on the estimate scaffolding; a fully-billed run leaves it all off.
+    show_estimated = show_grok_dagger or any(
+        row_uncached_estimated(r)
+        for key in ("token_summary", "model_summary")
+        for r in record.get(key, [])
+    )
 
     def _agent_name_cell(a: dict) -> str:
         name = esc(a["name"])
@@ -414,55 +429,58 @@ def render(record: dict) -> str:
         for k, v in record.get("environment", [])
     )
 
-    def _opt(s: dict, key: str) -> str:
-        value = s.get(key)
-        if value is None:
-            return "n/a" if key in ("uncached",) else "—"
-        if not isinstance(value, int):
-            return "—"
-        text = f"{value:,}"
-        if key == "uncached" and s.get("uncached_estimated"):
-            return f"~{text}"
-        return text
+    def _billed_cells(s: dict) -> tuple[str, str, str]:
+        """Uncached · Cache-read · Output for a summary row.
 
-    def _share(s: dict, key: str) -> str:
-        value = s.get(key)
-        if value is None:
-            return "n/a"
-        text = f"{value}%"
-        if key == "uncached_pct" and s.get("uncached_estimated"):
-            return f"~{text}"
-        return text
+        Uncached = tokens_in − cache-read, Cache-read = cache_read,
+        Output = tokens_out; the three sum to Total. Uncached is marked ~
+        only for a fallback/estimated row (never on a fully-billed run)."""
+        cr = int(s["cache_read"]) if isinstance(s.get("cache_read"), int) else 0
+        ti = int(s["tokens_in"]) if isinstance(s.get("tokens_in"), int) else 0
+        to = int(s["tokens_out"]) if isinstance(s.get("tokens_out"), int) else 0
+        uncached = ti - cr
+        unc_txt = f"~{uncached:,}" if row_uncached_estimated(s) else f"{uncached:,}"
+        return unc_txt, f"{cr:,}", f"{to:,}"
 
-    # Cache-neutral note shared by the two breakdown tables.
+    def _out_share(s: dict) -> str:
+        value = s.get("out_pct")
+        return f"{value}%" if value is not None else "n/a"
+
+    # Shared note for the two breakdown tables; the estimate sentence is gated.
     share_note = (
-        '<p class="note">Share = % of all tracked tokens (mixed units). '
+        '<p class="note">Share = % of all tracked tokens'
+        + (' (mixed units)' if show_estimated else '') + '. '
         'Gen.&nbsp;share = % of output (generated) tokens. '
-        'Uncached for Claude is exact (total &minus; cache-read); for grok it is '
-        '<b>estimated</b> as unique conversation tokens (assumes prefix caching — '
-        'actual billed uncached ≥ this), marked with ~.</p>'
+        'Uncached = tokens&nbsp;in &minus; cache-read (billed input processed once); '
+        'Uncached + Cache-read + Output = Total.'
+        + (' Fallback (conversation-unit) rows are <b>estimated</b>, marked ~.'
+           if show_estimated else '')
+        + '</p>'
     )
 
     # Optional by-role breakdown written by summarize_tokens.py.
     summary_section = ""
     if record.get("token_summary"):
-        srows = "\n".join(
-            f'        <tr><td>{esc(s["group"])}</td><td>{esc(s["models"])}</td>'
-            f'<td class="num">{esc(s["agents"])}</td>'
-            f'<td class="num">{_opt(s, "tokens_in")}</td>'
-            f'<td class="num">{_opt(s, "tokens_out")}</td>'
-            f'<td class="num">{int(s["tokens"]):,}</td>'
-            f'<td class="num">{esc(s["pct"])}%</td>'
-            f'<td class="num">{_share(s, "out_pct")}</td>'
-            f'<td class="num">{_opt(s, "uncached")}</td></tr>'
-            for s in record["token_summary"]
-        )
+        srows_html = []
+        for s in record["token_summary"]:
+            unc, crr, out = _billed_cells(s)
+            srows_html.append(
+                f'        <tr><td>{esc(s["group"])}</td><td>{esc(s["models"])}</td>'
+                f'<td class="num">{esc(s["agents"])}</td>'
+                f'<td class="num">{unc}</td>'
+                f'<td class="num">{crr}</td>'
+                f'<td class="num">{out}</td>'
+                f'<td class="num">{int(s["tokens"]):,}</td>'
+                f'<td class="num">{esc(s["pct"])}%</td>'
+                f'<td class="num">{_out_share(s)}</td></tr>'
+            )
+        srows = "\n".join(srows_html)
         summary_section = f"""
   <section>
     <h2>Token breakdown by role</h2>
     <div class="wrap">
     <table>
-      <thead><tr><th>Role</th><th>Model(s)</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th><th class="num">Uncached&nbsp;(&minus;cache)</th></tr></thead>
+      <thead><tr><th>Role</th><th>Model(s)</th><th class="num">Agents</th><th class="num">Uncached</th><th class="num">Cache-read</th><th class="num">Output</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th></tr></thead>
       <tbody>
 {srows}
       </tbody>
@@ -475,23 +493,26 @@ def render(record: dict) -> str:
     # Optional by-model breakdown written by summarize_tokens.py.
     model_summary_section = ""
     if record.get("model_summary"):
-        mrows = "\n".join(
-            f'        <tr><td>{esc(s["model"])}</td>'
-            f'<td class="num">{esc(s["agents"])}</td>'
-            f'<td class="num">{_opt(s, "tokens_in")}</td>'
-            f'<td class="num">{_opt(s, "tokens_out")}</td>'
-            f'<td class="num">{int(s["tokens"]):,}</td>'
-            f'<td class="num">{esc(s["pct"])}%</td>'
-            f'<td class="num">{_share(s, "out_pct")}</td>'
-            f'<td class="num">{_opt(s, "uncached")}</td></tr>'
-            for s in record["model_summary"]
-        )
+        mrows_html = []
+        for s in record["model_summary"]:
+            unc, crr, out = _billed_cells(s)
+            mrows_html.append(
+                f'        <tr><td>{esc(s["model"])}</td>'
+                f'<td class="num">{esc(s["agents"])}</td>'
+                f'<td class="num">{unc}</td>'
+                f'<td class="num">{crr}</td>'
+                f'<td class="num">{out}</td>'
+                f'<td class="num">{int(s["tokens"]):,}</td>'
+                f'<td class="num">{esc(s["pct"])}%</td>'
+                f'<td class="num">{_out_share(s)}</td></tr>'
+            )
+        mrows = "\n".join(mrows_html)
         model_summary_section = f"""
   <section>
     <h2>Token breakdown by model</h2>
     <div class="wrap">
     <table>
-      <thead><tr><th>Model</th><th class="num">Agents</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th><th class="num">Uncached&nbsp;(&minus;cache)</th></tr></thead>
+      <thead><tr><th>Model</th><th class="num">Agents</th><th class="num">Uncached</th><th class="num">Cache-read</th><th class="num">Output</th><th class="num">Total</th><th class="num">Share</th><th class="num">Gen.&nbsp;share</th></tr></thead>
       <tbody>
 {mrows}
       </tbody>
@@ -501,69 +522,50 @@ def render(record: dict) -> str:
   </section>
 """
 
-    # Donut charts by role and by model, on three measures: total tokens,
-    # generated (output) tokens, and uncached (Claude exact + grok estimate).
-    def _pies(value_key: str, center_label: str) -> list[str]:
-        figs = []
-        if record.get("token_summary"):
-            items = pie_slices(record["token_summary"], "group", value_key)
-            if items:
-                figs.append(pie_figure(items, "By role", center_label))
-        if record.get("model_summary"):
-            items = pie_slices(record["model_summary"], "model", value_key)
-            if items:
-                figs.append(pie_figure(items, "By model", center_label))
-        return figs
-
-    total_figs = _pies("tokens", "total tokens")
-    gen_figs = _pies("tokens_out", "output tokens")
-    uncached_figs = _pies("uncached", "uncached tokens")
-    pie_section = ""
-    if total_figs or gen_figs or uncached_figs:
-        blocks = ""
-        if total_figs:
-            blocks += f"""    <h3 class="pie-group">Total tokens</h3>
-    <div class="pies">
-{chr(10).join(total_figs)}
-    </div>
-    <p class="note">Slices are <b>total tokens</b>. Claude totals are billed (per-call, incl. cache-reads); grok totals are conversation size — not the same unit. Cache-neutral views below.</p>
-"""
-        if gen_figs:
-            blocks += f"""    <h3 class="pie-group">Generated tokens · cache-neutral (Gen.&nbsp;share)</h3>
-    <div class="pies">
-{chr(10).join(gen_figs)}
-    </div>
-    <p class="note">Slices are <b>output (generated) tokens</b> — neither provider inflates output, so this is the fair share of work. Matches the <b>Gen.&nbsp;share</b> column below.</p>
-"""
-        if uncached_figs:
-            blocks += f"""    <h3 class="pie-group">Uncached tokens · Claude exact + grok estimate</h3>
-    <div class="pies">
-{chr(10).join(uncached_figs)}
-    </div>
-    <p class="note">Slices are <b>uncached tokens</b>. Claude: total &minus; cache-reads (exact). Grok: estimated as unique conversation tokens (assumes prefix caching on re-read context — actual billed uncached ≥ this); legend values marked <b>~…(est.)</b>.</p>
-"""
-        pie_section = f"""
+    # A single output-share donut, by model — the fair "who generated the most
+    # real work" split. The Total-tokens and Uncached donut groups are retired.
+    donut_section = ""
+    if record.get("model_summary"):
+        items = pie_slices(record["model_summary"], "model", "tokens_out")
+        if items:
+            fig = pie_figure(items, "By model", "output tokens")
+            donut_section = f"""
   <section>
-    <h2>Token distribution</h2>
-{blocks}  </section>
+    <h2>Output share · by model</h2>
+    <div class="pies">
+{fig}
+    </div>
+    <p class="note">Slices are <b>output (generated) tokens</b> — no provider inflates output, so this is the fair share of real work done. Matches the <b>Gen.&nbsp;share</b> column below.</p>
+  </section>
 """
 
-    # Composition bars: all models/roles including grok (estimated uncached).
+    # Composition bars — the primary token view, in both facets (by model, by
+    # role). Segments: uncached + output (solid) + cache-read (hatched).
     cblocks = ""
     if record.get("model_summary"):
-        bars = comp_bars(record["model_summary"], "model")
+        bars = comp_bars(record["model_summary"], "model", show_estimated)
         if bars:
             cblocks += f'    <h3 class="pie-group">By model</h3>\n    <div class="comp">\n{bars}\n    </div>\n'
     if record.get("token_summary"):
-        bars = comp_bars(record["token_summary"], "group")
+        bars = comp_bars(record["token_summary"], "group", show_estimated)
         if bars:
             cblocks += f'    <h3 class="pie-group">By role</h3>\n    <div class="comp">\n{bars}\n    </div>\n'
     comp_section = ""
     if cblocks:
+        comp_note = (
+            'Bar length = billed total tokens (all bars share one scale). '
+            'Solid = <b>uncached</b> (input processed once) + <b>output</b>; '
+            'the hatched part is <b>cache-read</b> re-reads.'
+        )
+        if show_estimated:
+            comp_note += (
+                ' Fallback (conversation-unit) rows show an estimated uncached, '
+                'marked ~…(est.).'
+            )
         comp_section = f"""
   <section>
-    <h2>Token composition · uncached vs cache-reads</h2>
-    <p class="note">Bar length = total tokens (all bars share one scale). The hatched part is cache-read re-reads; the solid part is <b>uncached</b>. Claude uncached = total &minus; cache-read (exact). Grok uncached ≈ conversation total (estimated; assumes prefix caching — actual billed uncached ≥ this), marked ~…(est.).</p>
+    <h2>Token composition · by model and by role</h2>
+    <p class="note">{comp_note}</p>
 {cblocks}  </section>
 """
 
@@ -577,6 +579,8 @@ def render(record: dict) -> str:
     agents_note_parts = []
     if show_grok_dagger:
         agents_note_parts.append(GROK_UNITS_FOOTNOTE)
+    if show_estimated:
+        agents_note_parts.append(ESTIMATED_INDICATOR)
     if agents_note:
         agents_note_parts.append(agents_note)
     agents_note_html = (
@@ -615,9 +619,9 @@ def render(record: dict) -> str:
       </tbody>
     </table>
     </div>
-    <p class="note">Known token totals so far: in <b>{total_in:,}</b> · out <b>{total_out:,}</b> · total <b>{total:,}</b> (agents with numeric counts only; grok in/out splits are estimated).</p>
+    <p class="note">Known token totals so far: in <b>{total_in:,}</b> · out <b>{total_out:,}</b> · total <b>{total:,}</b> (agents with numeric counts only{"; grok in/out splits are estimated" if show_estimated else ""}).</p>
 {agents_note_html}  </section>
-{pie_section}{comp_section}{summary_section}{model_summary_section}
+{comp_section}{donut_section}{summary_section}{model_summary_section}
   <section>
     <h2>Environment</h2>
     <table>

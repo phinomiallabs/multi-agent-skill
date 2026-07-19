@@ -133,9 +133,12 @@ def summarize(record: dict) -> list[dict]:
             "pct": round(100.0 * g["tokens"] / total, 1),
             "out_pct": round(100.0 * g["tokens_out"] / total_out, 1),
             "uncached_pct": round(100.0 * uncached / total_uncached, 1),
+            # Stamp units so render need not guess from the model name: a group
+            # with any conversation row is "conversation" (uncached estimated);
+            # an all-billed group is "billed" (exact).
+            "units": "conversation" if g["has_conversation"] else "billed",
+            "uncached_estimated": estimated,
         }
-        if estimated:
-            row["uncached_estimated"] = True
         rows.append(row)
     tot_cache = sum(g["cache_read"] for g in groups.values())
     tot_uncached = sum(_group_uncached(g)[0] for g in groups.values())
@@ -203,9 +206,12 @@ def summarize_by_model(record: dict) -> list[dict]:
             "pct": round(100.0 * m["tokens"] / total, 1),
             "out_pct": round(100.0 * m["tokens_out"] / total_out, 1),
             "uncached_pct": round(100.0 * uncached / total_uncached, 1),
+            # Stamp units so render need not guess from the model name: a model
+            # with any conversation row is "conversation" (uncached estimated);
+            # an all-billed model is "billed" (exact).
+            "units": "conversation" if m["has_conversation"] else "billed",
+            "uncached_estimated": estimated,
         }
-        if estimated:
-            row["uncached_estimated"] = True
         rows.append(row)
     rows.sort(key=lambda r: r["tokens"], reverse=True)
 

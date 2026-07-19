@@ -1,0 +1,12 @@
+{
+  "text": "Done.",
+  "stopReason": "EndTurn",
+  "sessionId": "019f6600-1111-7000-aaaa-000000000000",
+  "requestId": "aaaa1111-2222-3333-4444-555566667777",
+  "num_turns": 3,
+  "params": {
+    "_meta": {
+      "totalTokens": 58231
+    }
+  }
+}
