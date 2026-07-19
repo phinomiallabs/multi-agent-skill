@@ -333,43 +333,48 @@ def pie_figure(items: list[dict], caption: str,
     )
 
 
-def composition_donut(record: dict, show_estimated: bool = False) -> str:
-    """PERMANENT figure: one donut splitting the run's total billed tokens
-    into cache-read / uncached input / output. Reads the "total (tracked)"
-    row of token_summary (written by summarize_tokens.py). Slice colours:
-    cache-read gets --muted to echo the hatched cache convention of the
-    composition bars; uncached/output take --s1/--s2. Returns "" when the
-    summary row is absent or empty (record not yet summarized)."""
-    total_row = None
-    for r in record.get("token_summary", []):
-        if str(r.get("group", "")).strip().lower().startswith("total"):
-            total_row = r
-            break
-    if not total_row:
-        return ""
-    cache_read = total_row.get("cache_read") or 0
-    out = total_row.get("tokens_out") or 0
-    # NB: the summary's "uncached" field is tokens - cache_read, which
-    # INCLUDES output. The input-side uncached slice must exclude it so the
-    # three slices sum exactly to the billed total.
-    if isinstance(total_row.get("tokens_in"), int):
-        uncached = max(total_row["tokens_in"] - cache_read, 0)
+def composition_slices(row: dict) -> list[dict]:
+    """Three drawable slices for one summary row's billed total: cache-read
+    (--muted, echoing the hatched cache convention of the composition bars),
+    uncached input (--s1) and output (--s2). NB: the summary's "uncached"
+    field is tokens - cache_read, which INCLUDES output — the input-side
+    slice must exclude it so the slices sum exactly to the row's total."""
+    cache_read = row.get("cache_read") or 0
+    out = row.get("tokens_out") or 0
+    if isinstance(row.get("tokens_in"), int):
+        uncached = max(row["tokens_in"] - cache_read, 0)
     else:
-        uncached = max((total_row.get("uncached") or 0) - out, 0)
+        uncached = max((row.get("uncached") or 0) - out, 0)
     parts = [
         {"label": "cache-read", "tokens": cache_read, "slot": "muted"},
         {"label": "uncached input", "tokens": uncached, "slot": "1"},
         {"label": "output", "tokens": out, "slot": "2"},
     ]
-    if show_estimated:
+    if row_uncached_estimated(row):
         parts[1]["estimated"] = True
     items = [p for p in parts if isinstance(p["tokens"], int) and p["tokens"] > 0]
-    if not items:
-        return ""
-    grand = sum(p["tokens"] for p in items)
+    grand = sum(p["tokens"] for p in items) or 1
     for p in items:
         p["pct"] = 100.0 * p["tokens"] / grand
-    return pie_figure(items, "Total tokens · composition", "total tokens")
+    return items
+
+
+def composition_donuts_by_model(record: dict) -> list[str]:
+    """PERMANENT figure group: one composition donut PER MODEL, each
+    splitting that model's total billed tokens into cache-read / uncached
+    input / output. Reads model_summary (written by summarize_tokens.py);
+    the "total (tracked)" row is skipped. Returns [] when the summary is
+    absent (record not yet summarized)."""
+    figs = []
+    for row in record.get("model_summary", []):
+        model = str(row.get("model", "")).strip()
+        if not model or model.lower().startswith("total"):
+            continue
+        items = composition_slices(row)
+        if not items:
+            continue
+        figs.append(pie_figure(items, model, "total tokens"))
+    return figs
 
 
 def comp_bars(rows: list[dict], label_key: str, show_estimated: bool = False) -> str:
@@ -561,36 +566,41 @@ def render(record: dict) -> str:
   </section>
 """
 
-    # Donuts. Two permanent figures:
-    #   1. Total-tokens composition — one donut splitting the run's whole
-    #      billed volume into cache-read / uncached input / output.
+    # Donuts. Two permanent groups:
+    #   1. Composition by model — one donut PER MODEL splitting its total
+    #      billed tokens into cache-read / uncached input / output (donut
+    #      center = that model's total).
     #   2. Output share by model — the fair "who generated the most real
     #      work" split. (The per-entity Total-tokens and Uncached donut
-    #      GROUPS remain retired; the composition donut is a single
-    #      three-slice figure, not a per-entity group.)
+    #      groups of old records remain retired.)
     donut_section = ""
-    figs = []
-    comp_fig = composition_donut(record, show_estimated)
-    if comp_fig:
-        figs.append(comp_fig)
-    if record.get("model_summary"):
-        items = pie_slices(record["model_summary"], "model", "tokens_out")
-        if items:
-            figs.append(pie_figure(items, "Output share · by model",
-                                   "output tokens"))
-    if figs:
-        all_figs = "\n".join(figs)
+    comp_figs = composition_donuts_by_model(record)
+    if comp_figs:
         est_note = (
-            ' Uncached is partly estimated (~) when the run includes '
-            'conversation-unit rows.' if show_estimated else ''
+            ' Uncached slices on conversation-unit (legacy grok) rows are '
+            'estimated (~).' if show_estimated else ''
         )
-        donut_section = f"""
+        all_figs = "\n".join(comp_figs)
+        donut_section += f"""
   <section>
-    <h2>Token donuts</h2>
+    <h2>Token composition · by model</h2>
     <div class="pies">
 {all_figs}
     </div>
-    <p class="note"><b>Composition</b>: the run's total billed tokens split into <b>cache-read</b> (re-read context), <b>uncached input</b> (processed once), and <b>output</b> (generated).{est_note} <b>Output share</b>: output tokens only — no provider inflates output, so this is the fair share of real work done; matches the <b>Gen.&nbsp;share</b> column below.</p>
+    <p class="note">Each donut is one model's <b>total billed tokens</b>, split into <b>cache-read</b> (re-read context), <b>uncached input</b> (processed once), and <b>output</b> (generated).{est_note}</p>
+  </section>
+"""
+    if record.get("model_summary"):
+        items = pie_slices(record["model_summary"], "model", "tokens_out")
+        if items:
+            fig = pie_figure(items, "By model", "output tokens")
+            donut_section += f"""
+  <section>
+    <h2>Output share · by model</h2>
+    <div class="pies">
+{fig}
+    </div>
+    <p class="note">Slices are <b>output (generated) tokens</b> — no provider inflates output, so this is the fair share of real work done. Matches the <b>Gen.&nbsp;share</b> column below.</p>
   </section>
 """
 
