@@ -45,12 +45,21 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
+import time
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
 SESSIONS_ROOT = Path.home() / ".grok" / "sessions"
 _TOKENS_RE = re.compile(rb'"totalTokens":\s*(\d+)')
+
+# --------------------------------------------------------------------------- #
+# Billed capture store (grok >= 0.2.103). See the "BILLED CAPTURE" section near
+# the bottom of this module for the recorder that mirrors cursor_tokens.py.
+# --------------------------------------------------------------------------- #
+USAGE_ROOT = Path.home() / ".grok-agent-usage"
+SCHEMA = "grok-agent-usage/1"
 
 
 def _iter_updates(session_dir: Path):
@@ -320,12 +329,265 @@ def grok_sessions_for_cwd(cwd: Path) -> list[dict]:
     return rows
 
 
+# =========================================================================== #
+# BILLED CAPTURE (grok >= 0.2.103) — mirrors cursor_tokens.py
+# --------------------------------------------------------------------------- #
+# The managed `grok` binary run with `--always-approve -p … --output-format json`
+# prints ONE exact usage object on stdout, cumulative across every model call and
+# already inclusive of any subagents the run spawned::
+#
+#     {"sessionId":"…","requestId":"…","usage":{
+#         "input_tokens":5200, "cache_read_input_tokens":56704,
+#         "output_tokens":164, "reasoning_tokens":150, "total_tokens":62068},
+#      "total_cost_usd":0.0283952, "num_turns":4, "modelUsage":{…}}
+#
+# Unlike grok's per-turn session ledger (which reports `inputTokens` as the
+# COMBINED input), the stdout `input_tokens` is the UNCACHED slice, disjoint from
+# `cache_read_input_tokens`; the two sum with `output_tokens` to `total_tokens`.
+# These are true *billed* units — directly comparable to Claude and cursor — so
+# billed rows carry ``units:"billed"``, ``exact:True``. The legacy gauge/ledger
+# functions above remain the honest fallback for pre-0.2.103 runs.
+#
+# `templates/grok-worker.sh` pipes the captured stdout into `--record`, which
+# writes one record per run into a per-cwd store this module reads back:
+#     ~/.grok-agent-usage/<url-escaped-cwd>/<session-id>.json
+# =========================================================================== #
+def cwd_dir(cwd: Path) -> Path:
+    """Per-cwd billed-store directory (mirrors cursor_tokens.cwd_dir)."""
+    escaped = urllib.parse.quote(str(Path(cwd).resolve()), safe="")
+    return USAGE_ROOT / escaped
+
+
+def normalize_model(name: str) -> str:
+    """Report label for a grok model id, e.g. "grok-4.5-build" -> "grok-4.5"."""
+    if not name:
+        return "grok"
+    return name[: -len("-build")] if name.endswith("-build") else name
+
+
+def _scan_json_objects(raw: str):
+    """Yield each top-level JSON object in `raw`, tolerating a pretty-printed
+    multi-line object and/or surrounding log noise (grok's `--output-format json`
+    stdout is a single object, not JSONL)."""
+    decoder = json.JSONDecoder()
+    i, n = 0, len(raw)
+    while i < n:
+        if raw[i] != "{":
+            i += 1
+            continue
+        try:
+            obj, end = decoder.raw_decode(raw, i)
+        except json.JSONDecodeError:
+            i += 1
+            continue
+        yield obj
+        i = max(end, i + 1)
+
+
+def parse_result_line(raw: str) -> dict | None:
+    """Return the grok result object carrying `usage` from captured stdout.
+
+    Prefers a whole-payload parse (the common case: stdout IS the object), then
+    scans for the last embedded object with a ``usage`` dict. Returns None when
+    no usage-bearing object is present (malformed / non-json / missing usage).
+    """
+    stripped = raw.strip()
+    if stripped:
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
+            return obj
+    best = None
+    for obj in _scan_json_objects(raw):
+        if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
+            best = obj
+    return best
+
+
+def _usage_from_obj(obj: dict) -> dict:
+    usage = obj.get("usage") if isinstance(obj.get("usage"), dict) else {}
+    return {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "reasoning_tokens": int(usage.get("reasoning_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+    }
+
+
+def _model_from_obj(obj: dict, override: str | None) -> str:
+    """Dominant model for the run: an explicit --model override wins, else the
+    modelUsage key with the highest cost (normalized), else "grok"."""
+    if override:
+        return override
+    mu = obj.get("modelUsage")
+    if isinstance(mu, dict) and mu:
+        def cost(key: str) -> float:
+            entry = mu.get(key)
+            return float(entry.get("costUSD") or 0) if isinstance(entry, dict) else 0.0
+        return normalize_model(max(mu, key=cost))
+    return "grok"
+
+
+def build_record(obj: dict, model: str | None, cwd: Path,
+                 *, created_at_ms: int | None = None) -> dict:
+    """Normalize a parsed grok result object into a persistable record dict.
+
+    Carries `modelUsage`, `cost_usd`, and the full `usage` slice through for
+    later per-model / cost use.
+    """
+    text = obj.get("text")
+    return {
+        "schema": SCHEMA,
+        "session_id": obj.get("sessionId") or "unknown",
+        "request_id": obj.get("requestId"),
+        "model": _model_from_obj(obj, model),
+        "cwd": str(Path(cwd).resolve()),
+        "created_at_ms": int(created_at_ms if created_at_ms is not None else time.time() * 1000),
+        "num_turns": obj.get("num_turns"),
+        "stop_reason": obj.get("stopReason"),
+        "text": text if isinstance(text, str) else None,
+        "cost_usd": obj.get("total_cost_usd"),
+        "modelUsage": obj.get("modelUsage") if isinstance(obj.get("modelUsage"), dict) else {},
+        "usage": _usage_from_obj(obj),
+    }
+
+
+def _row_from_record(rec: dict) -> dict:
+    """Normalized billed row from a record dict (the shared transform).
+
+    Row keys mirror the Claude/cursor row schema so the report renders grok
+    uniformly: tokens_in (uncached + cache_read), tokens_out, tokens, cache_read,
+    in_uncached, model, units ("billed"), exact (True), cost_usd, modelUsage.
+    """
+    usage = rec.get("usage") if isinstance(rec.get("usage"), dict) else {}
+    in_unc = int(usage.get("input_tokens") or 0)
+    cache_r = int(usage.get("cache_read_input_tokens") or 0)
+    out = int(usage.get("output_tokens") or 0)
+    total = int(usage.get("total_tokens") or 0)
+    tokens_in = in_unc + cache_r
+    model = rec.get("model") or "grok"
+    title = ((rec.get("text") or "").strip().replace("\n", " ")[:60]) or "grok run"
+    return {
+        "id": rec.get("session_id") or "unknown",
+        "path": None,
+        "tokens_in": tokens_in,
+        "tokens_out": out,
+        "tokens": total,
+        "cache_read": cache_r,
+        "in_uncached": in_unc,
+        # cursor-compatible mirrors (grok has no separate cache-write):
+        "cache_r": cache_r,
+        "cache_w": 0,
+        "reasoning": int(usage.get("reasoning_tokens") or 0),
+        "cost_usd": rec.get("cost_usd"),
+        "model": model,
+        "model_label": model,
+        "modelUsage": rec.get("modelUsage") if isinstance(rec.get("modelUsage"), dict) else {},
+        "num_turns": rec.get("num_turns"),
+        "elapsed": "?",  # grok stdout carries no wall-clock duration
+        "title": title,
+        "exact": True,
+        "units": "billed",
+    }
+
+
+def row_from_stdout(raw: str, *, model: str | None = None) -> dict | None:
+    """Pure transform: captured grok stdout -> normalized billed row (or None).
+
+    This is Seam 1 — no filesystem, no subprocess. Returns None when stdout
+    carried no parseable usage object.
+    """
+    obj = parse_result_line(raw)
+    if obj is None:
+        return None
+    return _row_from_record(build_record(obj, model, Path.cwd()))
+
+
+def write_record(raw: str, model: str | None, cwd: Path,
+                 *, created_at_ms: int | None = None) -> Path | None:
+    """Persist one grok run's billed usage from captured stdout. Returns the path.
+
+    Idempotent per session_id: re-recording the same run overwrites its file.
+    Returns None when the stdout carried no parseable usage object.
+    """
+    obj = parse_result_line(raw)
+    if obj is None:
+        return None
+    record = build_record(obj, model, cwd, created_at_ms=created_at_ms)
+    dest_dir = cwd_dir(Path(cwd))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{record['session_id']}.json"
+    dest.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
+    return dest
+
+
+def billed_session_info(record_path: Path) -> dict:
+    """Exact billed row for one recorded grok run (record file -> row)."""
+    try:
+        rec = json.loads(Path(record_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        rec = {}
+    row = _row_from_record(rec)
+    row["path"] = str(record_path)
+    return row
+
+
+def billed_sessions_for_cwd(cwd: Path) -> list[Path]:
+    """Recorded billed-run files for a cwd, newest first."""
+    root = cwd_dir(Path(cwd))
+    if not root.is_dir():
+        return []
+    files = [f for f in root.glob("*.json") if f.is_file()]
+    return sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)
+
+
+def grok_billed_sessions_for_cwd(cwd: Path) -> list[dict]:
+    """Per-run exact billed usage for a cwd (newest first).
+
+    The reader aggregate_tokens.py calls for modern (>= 0.2.103) grok runs: one
+    row per worker invocation, subagents already folded in, every row exact &
+    billed. Mirrors cursor_tokens.cursor_sessions_for_cwd.
+    """
+    return [billed_session_info(p) for p in billed_sessions_for_cwd(cwd)]
+
+
+def _record_main(args: argparse.Namespace) -> None:
+    raw = sys.stdin.read()
+    dest = write_record(raw, args.model, args.cwd)
+    if dest is None:
+        raise SystemExit(
+            "grok_tokens --record: no usage object on stdin; was `grok` run with "
+            "`--always-approve -p … --output-format json`?"
+        )
+    info = billed_session_info(dest)
+    cost = info.get("cost_usd")
+    cost_str = f" cost=${cost:.4f}" if isinstance(cost, (int, float)) else ""
+    print(
+        f"recorded {dest}\n  model={info['model']} "
+        f"in(uncached)={info['in_uncached']:,} cache_read={info['cache_read']:,} "
+        f"out={info['tokens_out']:,} total(billed)={info['tokens']:,}{cost_str}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--record", action="store_true",
+                        help="record mode: read captured `grok` stdout on STDIN "
+                             "and write a billed usage record for --cwd")
+    parser.add_argument("--model", default=None,
+                        help="override the recorded model id (record mode; "
+                             "default: derive from stdout modelUsage)")
     parser.add_argument("--cwd", type=Path, default=Path.cwd(),
                         help="repo the grok run was launched from (default: cwd)")
     parser.add_argument("-n", type=int, default=5, help="max sessions to list")
     args = parser.parse_args()
+
+    if args.record:
+        _record_main(args)
+        return
 
     rows = grok_sessions_for_cwd(args.cwd.resolve())
     if not rows:

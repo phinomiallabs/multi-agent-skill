@@ -4,7 +4,7 @@
 The per-run monitor historically only tracked directly-launched Claude
 subagents. This CLI sweeps every known ground-truth location so a run record
 can include the advisor session, direct launches, nested (sub-subagent)
-Claude transcripts, and grok-agent sessions.
+Claude transcripts, and grok and cursor sessions.
 
 Ground-truth locations
 ----------------------
@@ -14,8 +14,12 @@ Ground-truth locations
     /tmp/claude-1000/<project-slug>/<session-id>/tasks/a*.output
   Parentage is NOT recorded. Tag stems listed in --direct as direct; every
   other a*.output is rolled into one aggregated "nested" group.
-* Grok sessions for each --repo-cwd (conversation-size units; see below):
-    enumerated by grok_tokens.sessions_for_cwd
+* Grok runs for each --repo-cwd. Two sources, billed preferred:
+    * exact BILLED usage captured at run time by templates/grok-worker.sh into
+      ~/.grok-agent-usage/<url-escaped-cwd>/<session>.json (schema
+      grok-agent-usage/1), read via grok_tokens.grok_billed_sessions_for_cwd.
+    * legacy conversation-size sessions (grok_tokens.grok_sessions_for_cwd),
+      a fallback only for old runs with no billed record (see below).
 * Cursor CLI (`agent`) runs for each --repo-cwd (exact billed units):
     ~/.cursor-agent-usage/<url-escaped-cwd>/<session-id>.json, captured at run
     time by templates/cursor-worker.sh (cursor persists no usage on disk).
@@ -23,15 +27,17 @@ Ground-truth locations
 Units honesty
 -------------
 Every row carries an explicit `units` field:
-  * ``"billed"``       — Claude (advisor / direct / nested) AND Cursor. Per-call
-    billed input: full context (incl. cache_read) counted every API call.
-    ``tokens_in`` = uncached + cache_read + cache_write. Cursor's model string
-    is "grok-4.5", which contains "grok", so cursor rows set units="billed"
-    EXPLICITLY — never rely on the model-name heuristic for them.
-  * ``"conversation"`` — Grok (native grok-agent). Session totalTokens tracks
-    **conversation size** (context-window growth over the run), NOT per-call
-    billed input. Not comparable to Claude/cursor columns. Rough
-    billed-equivalent ≈ avg context size × n_calls (often ~10–20× the total).
+  * ``"billed"``       — Claude (advisor / direct / nested), Cursor, AND grok on
+    ≥0.2.103 (exact billed usage captured at run time). Per-call billed input:
+    full context (incl. cache_read) counted every API call. ``tokens_in`` =
+    uncached + cache_read (+ cache_write for Claude). Cursor's and billed grok's
+    model strings contain "grok", so those rows set units="billed" EXPLICITLY —
+    never rely on the model-name heuristic for them.
+  * ``"conversation"`` — legacy grok (≤0.2.93) gauge fallback only, emitted for
+    a session with NO billed record. Session totalTokens tracks **conversation
+    size** (context-window growth over the run), NOT per-call billed input. Not
+    comparable to billed columns. Rough billed-equivalent ≈ avg context size ×
+    n_calls (often ~10–20× the total).
 Never mix the two in uncached-share / donut math without filtering on
 ``units`` (see summarize_tokens.py / generate_monitor.py).
 
@@ -42,9 +48,10 @@ message.model id in each transcript (via claude_tokens.friendly_model_name:
 Fable 5, Sonnet 5, Opus 4.8, Haiku 4.5, or the raw id). The advisor/direct/
 nested distinction stays in `source` (agents) / `group` (token_log) — never
 in the model string. If a transcript has no model field, fall back to the
-legacy generic labels ("claude (advisor session)", etc.). Grok rows keep
-session metadata model ids unchanged. Old run JSONs without per-row model
-ids still render; only the model string content changes for new sweeps.
+legacy generic labels ("claude (advisor session)", etc.). Grok rows keep the
+model id from the billed record (e.g. "grok-4.5"), or session metadata for
+legacy rows. Old run JSONs without per-row model ids still render; only the
+model string content changes for new sweeps.
 
 Usage:
     python aggregate_tokens.py --session-id <id> --project-slug <slug> \\
@@ -66,7 +73,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from claude_tokens import friendly_model_name, transcript_usage  # noqa: E402
 from cursor_tokens import cursor_sessions_for_cwd  # noqa: E402
-from grok_tokens import grok_sessions_for_cwd  # noqa: E402
+from grok_tokens import (  # noqa: E402
+    grok_billed_sessions_for_cwd,
+    grok_sessions_for_cwd,
+)
 
 ADVISOR_ROOT = Path.home() / ".claude" / "projects"
 TASKS_ROOT = Path("/tmp/claude-1000")
@@ -194,11 +204,53 @@ def collect(
         **nested_extra,
     ))
 
-    # (c) Grok sessions per repo cwd (deduped; exact ledger preferred, gauge
-    # fallback, subagent children rolled up without double-counting).
+    # (c) Grok sessions per repo cwd. Two sources, in priority order:
+    #   1. exact BILLED usage captured at run time by templates/grok-worker.sh
+    #      into ~/.grok-agent-usage/<cwd>/<session>.json (schema
+    #      grok-agent-usage/1), read via grok_billed_sessions_for_cwd. These are
+    #      real per-call billed tokens (uncached + cache_read + output, with USD
+    #      cost) — units="billed", exact, comparable to Claude/cursor columns.
+    #   2. legacy conversation-size gauge/ledger sweep (grok_sessions_for_cwd),
+    #      a FALLBACK only for sessions with NO billed record (old 0.2.93 runs) —
+    #      units="conversation", not comparable to billed columns.
+    # Dedup: a session with a billed record — and any subagent whose parent has
+    # one (the billed total already folds it in) — is skipped in the fallback so
+    # it is never double-counted.
     for cwd in repo_cwds:
         resolved = cwd.resolve()
+
+        billed_ids: set[str] = set()
+        for info in grok_billed_sessions_for_cwd(resolved):
+            sid = info.get("id")
+            if sid:
+                billed_ids.add(sid)
+            rows.append({
+                "kind": "grok",
+                "name": sid or "grok",
+                "tokens_in": info["tokens_in"] or 0,
+                "tokens_out": info["tokens_out"] or 0,
+                "tokens": info["tokens"] or 0,
+                "exact": info.get("exact", True),
+                # billed: per-call input incl. cache-read; comparable to Claude.
+                "units": info.get("units", "billed"),
+                # cache-read stored under "cached" — the grok row's cache key
+                # that _as_agents / _as_token_log read for kind == "grok".
+                "cached": info.get("cache_read") or 0,
+                "cost_usd": info.get("cost_usd"),
+                "model": info.get("model", "grok"),
+                "elapsed": info.get("elapsed", "?"),
+                "title": info.get("title", "?"),
+                "cwd": str(resolved),
+                "path": info.get("path"),
+            })
+
         for info in grok_sessions_for_cwd(resolved):
+            # Fallback only: skip any session already emitted as an exact billed
+            # row, and any subagent whose parent was recorded (its total is
+            # folded into the parent's billed row) — no double-count.
+            if (info["id"] in billed_ids
+                    or info.get("parent_session_id") in billed_ids):
+                continue
             rows.append({
                 "kind": "grok",
                 "name": info["id"],
@@ -206,9 +258,9 @@ def collect(
                 "tokens_out": info["tokens_out"] or 0,
                 "tokens": info["tokens"] or 0,
                 # exact when read from the additive ledger; gauge/estimate else.
-                # units=conversation: totalTokens is conversation size, NOT
-                # per-call billed input (not comparable to Claude billed rows).
                 "exact": info.get("exact", False),
+                # units=conversation: totalTokens is conversation size, NOT
+                # per-call billed input (not comparable to billed rows).
                 "units": "conversation",
                 "basis": info.get("basis"),
                 "cached": info.get("cached"),
@@ -300,6 +352,8 @@ def _as_agents(rows: list[dict]) -> list[dict]:
             entry["elapsed"] = r.get("elapsed", "?")
             entry["title"] = r.get("title", "?")
             entry["session_id"] = r["name"]
+        if r["kind"] == "grok" and r.get("cost_usd") is not None:
+            entry["cost_usd"] = r["cost_usd"]
         if r["kind"] == "nested":
             entry["transcripts"] = r.get("transcripts", 0)
         if r["kind"] == "direct":
@@ -334,6 +388,8 @@ def _as_token_log(rows: list[dict]) -> list[dict]:
         if r["kind"] in ("grok", "cursor"):
             entry["task"] = r.get("title", "")
             entry["session_id"] = r["name"]
+        if r["kind"] == "grok" and r.get("cost_usd") is not None:
+            entry["cost_usd"] = r["cost_usd"]
         log.append(entry)
     return log
 
@@ -358,7 +414,11 @@ def print_table(result: dict) -> None:
         elif r["kind"] == "direct":
             notes = f"{model} · exact · direct launch" if model else "exact · direct launch"
         elif r["kind"] == "grok":
-            notes = f"est. split · {r.get('model', '?')} · {r.get('elapsed', '?')}"
+            if r.get("units") == "billed":
+                basis = "exact billed"
+            else:
+                basis = "est. split · conversation"
+            notes = f"{basis} · {r.get('model', '?')} · {r.get('elapsed', '?')}"
             if r.get("title") and r["title"] != "?":
                 notes += f" · {r['title'][:40]}"
         elif r["kind"] == "cursor":

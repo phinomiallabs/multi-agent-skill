@@ -101,9 +101,9 @@ python monitor/generate_monitor.py runs/<date>-<slug>.json -o runs/<date>-<slug>
 ### Units warning (billed vs conversation)
 
 * Claude rows: `units: "billed"` — per-call billed input (full context re-counted every API call, incl. `cache_read`).
-* **Cursor** rows: `units: "billed"` too, and **exact** — the `agent` CLI reports real per-run usage (`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`). Directly comparable to Claude. Cursor persists nothing on disk, so the worker captures it at run time into `~/.cursor-agent-usage/<cwd>/<session>.json`; `aggregate`/`update_run_record` pick it up via `--repo-cwd` (same flag as grok). The model is tagged `"<model> (cursor)"` so a cursor grok-4.5 run is never conflated with a native grok-agent run — and because that label contains "grok", cursor rows **always** carry an explicit `units: "billed"`.
-* Grok rows: `units: "conversation"` — session `totalTokens` is **conversation size**, not per-call billed input. **Not comparable** to billed total columns. Rough billed-equivalent ≈ avg context size × n_calls (often ~10–20× larger). Agents table keeps a † footnote on conversation-unit rows for that reason.
-* **Uncached**: Claude and cursor are exact (`tokens − cache_read`). Grok has no per-call billed usage in session logs, so uncached is **estimated** as the conversation total (each unique token processed uncached once; assumes prefix caching on re-read context — actual billed uncached ≥ this lower bound). Estimated rows set `uncached_estimated: true` and appear in Unc% / uncached donuts/bars with legend values marked `~…(est.)`.
+* **Cursor** rows: `units: "billed"` too, and **exact** — the `agent` CLI reports real per-run usage (`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`). Directly comparable to Claude. Cursor persists nothing on disk, so the worker captures it at run time into `~/.cursor-agent-usage/<cwd>/<session>.json`; `aggregate`/`update_run_record` pick it up via `--repo-cwd` (same flag as grok). The model is tagged `"<model> (cursor)"` so a cursor grok-4.5 run is never conflated with a native grok run — and because that label contains "grok", cursor rows **always** carry an explicit `units: "billed"`.
+* **Grok** rows: `units: "billed"` and **exact** on grok ≥0.2.103 — the managed `grok` binary reports real per-run billed usage (uncached input / cache-read / output + USD cost), captured at run time into `~/.grok-agent-usage/<cwd>/<session>.json` (grok persists none on disk, exactly like cursor) and picked up via `--repo-cwd`. Directly comparable to Claude and cursor; the billed model string (e.g. `grok-4.5`) contains "grok", so these rows set `units: "billed"` explicitly. **Legacy** grok (≤0.2.93, no billed record) falls back to `units: "conversation"` — session `totalTokens` is **conversation size**, not per-call billed input, **not comparable** to billed columns (rough billed-equivalent ≈ avg context size × n_calls, often ~10–20× larger); the agents table keeps a † footnote on those conversation-unit rows.
+* **Uncached**: Claude, cursor, and billed grok are exact (`tokens − cache_read`). Only **legacy** grok (conversation units, no billed record) is **estimated** — uncached ≈ the conversation total (each unique token processed uncached once; assumes prefix caching on re-read context — actual billed uncached ≥ this lower bound). Estimated rows set `uncached_estimated: true` and appear in Unc% / uncached donuts/bars with legend values marked `~…(est.)`.
 
 ### Tooling
 
@@ -114,7 +114,7 @@ All scripts are in `monitor/`. Each documents its arguments and exact token sema
 * `aggregate_tokens.py --session-id <id> --project-slug <slug> [--repo-cwd <repo> ...] [--direct <agentId> ...]` — one-shot complete sweep (used by `update_run_record.py`). `--json` for machine-readable rows; do **not** hand-transcribe the table into the record.
 * `generate_monitor.py <run.json> -o <out.html>` — renders the monitor page from the record; publish/refresh the artifact from it.
 * `summarize_tokens.py <run.json>` — writes the by-role and by-model breakdowns (with percentages) back into the record. Run after every `update_run_record`.
-* `claude_tokens.py`, `grok_tokens.py`, and `cursor_tokens.py` are the per-source helpers `aggregate_tokens.py` already calls; use them directly only for spot checks. `cursor_tokens.py --record` (fed the captured `agent` JSON on stdin) is how a cursor run's usage lands in the store — the worker does this automatically; run it by hand only to re-record a run whose output you captured separately.
+* `claude_tokens.py`, `grok_tokens.py`, and `cursor_tokens.py` are the per-source helpers `aggregate_tokens.py` already calls; use them directly only for spot checks. `grok_tokens.py --record` and `cursor_tokens.py --record` (each fed the captured `grok` / `agent` JSON on stdin) are how a run's exact billed usage lands in its store — the workers do this automatically; run them by hand only to re-record a run whose output you captured separately.
 
 ### Finding the ids (no memory required)
 
@@ -126,11 +126,11 @@ All scripts are in `monitor/`. Each documents its arguments and exact token sema
 
 ### Reporting
 
-Report every subagent's tokens split into input and output. Claude splits are exact (from the harness/transcripts); grok splits are estimates of conversation-size units, with only the total exact in those units — label them as such. Totals remain not billed-comparable across providers; uncached views include grok as an estimate (see Units warning). Model names for Claude rows come from each transcript's assistant `message.model` (friendly labels like Sonnet 5 / Fable 5); grok rows keep grok session metadata.
+Report every subagent's tokens split into input and output. Claude, cursor, and grok (≥0.2.103) splits are exact billed and comparable; only **legacy** grok rows (≤0.2.93) are conversation-size units with an estimated split (only the total exact in those units) — label them as such. Uncached views treat only legacy grok as an estimate (see Units warning). Model names for Claude rows come from each transcript's assistant `message.model` (friendly labels like Sonnet 5 / Fable 5); grok rows keep the model id from the billed record (e.g. `grok-4.5`), or session metadata for legacy rows.
 
 ## Using non-Claude models
 
-**Grok** — use `grok-agent` as an implementation worker. The prompt template lives in `templates/grok-worker.sh`: fill in every `[FILL IN]`, then run it from the target repo. It invokes `grok-agent --yolo -p "<prompt>"`.
+**Grok** — use the managed `grok` binary as an implementation worker (the standalone `grok-agent` has been removed). The prompt template lives in `templates/grok-worker.sh`: fill in every `[FILL IN]`, then run it from the target repo. It invokes `grok --always-approve -p "<prompt>" --output-format json`. Like cursor, it runs headless in JSON mode and **captures the exact billed usage at run time** — piping grok's stdout into `monitor/grok_tokens.py --record` writes one record per run into `~/.grok-agent-usage/<cwd>/<session>.json`, which the monitor reads back via `--repo-cwd` (see [Monitoring](#monitoring)).
 
 **Cursor** — use `agent` as an implementation worker. The template lives in `templates/cursor-worker.sh`; it invokes `agent --model "<model>" --force "<prompt>"`. Default model is `grok-4.5`. For a `cursor-<model>` request (e.g. `cursor-grok-4.5`), pass the part after `cursor-` as the model: `MODEL=grok-4.5 templates/cursor-worker.sh`. The worker runs headless (`-p --output-format json`) and **captures the exact billed usage at run time** — cursor persists no tokens on disk, so this is the only chance to record them (see [Monitoring](#monitoring)).
 
@@ -142,4 +142,4 @@ git diff --stat
 git diff
 ```
 
-grok-agent prints no token usage in headless mode; account for it with `monitor/grok_tokens.py` (see [Monitoring](#monitoring)).
+Both grok and cursor persist no token usage on disk, so each worker captures the exact billed split at run time (`monitor/grok_tokens.py --record` / `monitor/cursor_tokens.py --record`); `aggregate`/`update_run_record` then pick it up via `--repo-cwd` (see [Monitoring](#monitoring)).
