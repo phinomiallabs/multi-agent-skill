@@ -35,7 +35,7 @@ Fill in the bullets.
 |------|------------|
 | `SKILL.md` | The skill: workflow, roles, rules, monitoring, and how to drive non-Claude models. |
 | `monitor/` | Token-accounting and live-HTML-monitor tooling (see below). |
-| `templates/grok-worker.sh` | Fill-in prompt template for running `grok-agent` as an implementation worker. |
+| `templates/grok-worker.sh` | Fill-in prompt template for running Grok Build as an implementation worker. |
 | `templates/cursor-worker.sh` | Fill-in template for running the Cursor CLI (`agent`) as a worker; captures exact billed token usage at run time. |
 | `runs/` | Per-run records and artifacts. **Gitignored** — they hold repo-specific, sensitive data. |
 
@@ -57,4 +57,4 @@ counts update live as the run progresses.
 ## Requirements
 
 - Python 3 — standard library only, no dependencies.
-- `grok-agent` and/or the Cursor CLI (`agent`) on `PATH` for the non-Claude implementer workers.
+- Grok Build and/or the Cursor CLI (`agent`) on `PATH` for the non-Claude implementer workers; other agent CLIs (e.g. Kimi Code, ZCode, opencode) work too.
