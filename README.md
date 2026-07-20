@@ -21,6 +21,8 @@ Run
 
 Fill in the bullets. 
 
+> **Recommended:** use this skill with Grok Build >= 0.2.106 (check with `grok --version`) and the skills from [mattpocock/skills](https://github.com/mattpocock/skills).
+
 ## Roles
 
 - **Advisor** (Claude) — orchestrates, designs tests, and adversarially verifies. Doesn't write code itself.
