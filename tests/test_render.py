@@ -153,10 +153,12 @@ def test_billed_render_is_a_string_with_title():
     assert "Billed run — three providers" in html
 
 
-def test_billed_has_exactly_one_output_share_donut():
+def test_billed_has_exactly_two_model_share_donuts():
     html = generate_monitor.render(_billed_record())
-    # One <svg class="donut"> only — the single output-share donut, by model.
-    assert html.count('class="donut"') == 1
+    # Two <svg class="donut">: total tokens by model, and output share by model.
+    assert html.count('class="donut"') == 2
+    assert "Total tokens · by model" in html
+    assert "Output share · by model" in html
 
 
 def test_billed_has_no_total_or_uncached_donut_groups():
