@@ -52,8 +52,6 @@ You are the advisor. Your job is to orchestrate and verify.
 ```text
 === SHARED MESSAGE FOR ALL SUBAGENTS ===
     Read [(optional) instructions]
-    Scope your tasks. Protect your context window. Subagents are a good tool to protect your context window, among other uses. 
-    You can launch subagents of your own.  
     Model selection guide
         - Writing tests: [implementer model name]
         - Coding: [implementer model name]
