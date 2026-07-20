@@ -30,7 +30,7 @@ Run
 
 ```
 
-Fill in the bullets. 
+Fill in the bullets. Note: the model with which you call this skill is the advisor. 
 
 > **Recommended:** use this skill with Grok Build >= 0.2.106 (check with `grok --version`) and the skills from [mattpocock/skills](https://github.com/mattpocock/skills).
 
