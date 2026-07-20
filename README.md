@@ -5,6 +5,17 @@ that plans the work, delegates implementation and investigation to non-Claude
 subagents (e.g. Grok), and adversarially verifies the results. The full workflow
 lives in [`SKILL.md`](SKILL.md).
 
+## Installation
+
+Clone into your Claude Code skills directory — personal (all projects) or project-level:
+
+```bash
+git clone https://github.com/phinomiallabs/multi-agent-skill.git ~/.claude/skills/multi-agent-skill   # personal
+git clone https://github.com/phinomiallabs/multi-agent-skill.git .claude/skills/multi-agent-skill    # this project only
+```
+
+The directory name becomes the command name (`/multi-agent-skill`).
+
 ## Quick start
 
 Run
