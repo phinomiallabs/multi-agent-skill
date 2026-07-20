@@ -58,3 +58,7 @@ counts update live as the run progresses.
 
 - Python 3 — standard library only, no dependencies.
 - Grok Build and/or the Cursor CLI (`agent`) on `PATH` for the non-Claude implementer workers; other agent CLIs (e.g. Kimi Code, ZCode, opencode) work too.
+
+## Acknowledgements
+
+Some ideas borrowed from [kunchenguid/dotfiles](https://github.com/kunchenguid/dotfiles/).
