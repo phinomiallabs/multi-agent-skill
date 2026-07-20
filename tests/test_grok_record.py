@@ -42,7 +42,7 @@ def test_multicall_exact_numbers():
     assert row["exact"] is True
     assert row["cost_usd"] == 0.0283952
     assert row["model"] == "grok-4.5"         # normalized from "grok-4.5-build"
-    assert row["id"] == "019f77d4-4a4c-7f31-bf94-d2fccba9af0e"
+    assert row["id"] == "019f0002-0000-7000-aaaa-000000000002"
     # tokens is exactly the sum of the two billed sides.
     assert row["tokens"] == row["tokens_in"] + row["tokens_out"]
 
@@ -158,7 +158,7 @@ def test_write_read_round_trip(tmp_path, monkeypatch):
     dest = grok_tokens.write_record(read_fixture_text(MULTICALL), None, cwd)
     assert dest is not None
     # Stored under ~/.grok-agent-usage/<url-escaped-cwd>/<session-id>.json layout.
-    assert dest == grok_tokens.cwd_dir(cwd) / "019f77d4-4a4c-7f31-bf94-d2fccba9af0e.json"
+    assert dest == grok_tokens.cwd_dir(cwd) / "019f0002-0000-7000-aaaa-000000000002.json"
     assert dest.is_file()
 
     import json
@@ -194,8 +194,8 @@ def test_grok_billed_sessions_for_cwd(tmp_path, monkeypatch):
     rows = grok_tokens.grok_billed_sessions_for_cwd(cwd)
     assert len(rows) == 2
     by_id = {r["id"]: r for r in rows}
-    assert by_id["019f77d4-4a4c-7f31-bf94-d2fccba9af0e"]["tokens"] == 62068
-    assert by_id["019f77ce-ffac-7bc2-a1aa-893feabf1c69"]["tokens"] == 15326
+    assert by_id["019f0002-0000-7000-aaaa-000000000002"]["tokens"] == 62068
+    assert by_id["019f0001-0000-7000-aaaa-000000000001"]["tokens"] == 15326
     for r in rows:
         assert r["units"] == "billed"
         assert r["exact"] is True
